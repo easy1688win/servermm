@@ -363,6 +363,12 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         balance: typeof g.balance === 'number' ? g.balance : Number(g.balance ?? 0),
       }));
 
+      const gameIconMap: Record<string, string | null> = {};
+      for (const g of gamesRaw as any[]) {
+        if (!g || !g.name) continue;
+        gameIconMap[g.name] = g.icon || null;
+      }
+
       const gameAdjustments = (adjustmentsRaw as any[]).map((a: any) => {
         const amount = a.amount != null ? Number(a.amount) : 0;
         const afterBalance =
@@ -394,6 +400,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       return res.json({
         generatedAt: new Date().toISOString(),
         games,
+        gameIconMap,
         transactions: shapedTransactions,
         gameAdjustments,
         operatorOptions
@@ -635,6 +642,12 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         balance: Number(g.balance),
       }));
 
+      const gameIconMap: Record<string, string | null> = {};
+      for (const g of games as any[]) {
+        if (!g || !g.name) continue;
+        gameIconMap[g.name] = g.icon || null;
+      }
+
       const payloadTransactions = (shapedTransactions as any[]).map((t) => ({
         id: t.id,
         createdAt: t.createdAt ?? t.created_at ?? null,
@@ -699,13 +712,16 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       return res.json({
         transactions: payloadTransactions,
-        bankAccounts: payloadBankAccounts,
-        games: payloadGames,
+        games: shapedGamesFull,
+        gameIconMap,
+        bankAccounts: shapedBankAccountsFull,
+        pagination: {
+          page,
+          pageSize,
+          totalItems: total,
+          totalPages,
+        },
         operatorOptions,
-        page,
-        pageSize,
-        total,
-        totalPages,
       });
     }
 

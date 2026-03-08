@@ -10,6 +10,9 @@ import UserSession from '../models/UserSession';
 import UserDeviceLock from '../models/UserDeviceLock';
 import { AuthRequest } from '../middleware/auth';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
+import speakeasy from 'speakeasy';
+import QRCode from 'qrcode';
+import { setCache, getCache, invalidateCache } from '../services/CacheService';
 
 const secret = process.env.JWT_SECRET;
 if (!secret) {
@@ -103,6 +106,184 @@ const getClientIp = (req: Request): string | null => {
 };
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
+
+const PRE_AUTH_SECRET = process.env.JWT_SECRET + '_PRE_AUTH';
+
+const finalizeLogin = async (user: any, req: Request, res: Response, deviceId: string, deviceName: string | undefined, clientIp: string | null) => {
+    const userAgent = req.headers['user-agent'] || null;
+    const jti = crypto.randomBytes(16).toString('hex');
+
+    const t = await sequelize.transaction();
+    let kickedSessions: { original: any; updated: any }[] = [];
+
+    try {
+      const activeSessions = await UserSession.findAll({
+        where: {
+          user_id: user.id,
+          is_active: true,
+        },
+        order: [['createdAt', 'ASC']],
+        transaction: t,
+        lock: t.LOCK.UPDATE as any,
+      });
+
+      // Revoke sessions with same device ID
+      for (const s of activeSessions.filter((s) => s.device_id === deviceId)) {
+        const original = s.toJSON();
+        s.is_active = false;
+        s.revoked_at = new Date();
+        s.revoked_reason = 'REPLACED_BY_NEW_LOGIN';
+        await s.save({ transaction: t });
+        kickedSessions.push({ original, updated: s.toJSON() });
+      }
+
+      const remaining = activeSessions.filter((s) => s.device_id !== deviceId);
+      const MAX_ALLOWED = MAX_DEVICES_PER_USER; 
+      
+      const uniqueDevices = new Map<string, typeof remaining>();
+      remaining.forEach(s => {
+        if (!uniqueDevices.has(s.device_id)) {
+           uniqueDevices.set(s.device_id, []);
+        }
+        uniqueDevices.get(s.device_id)?.push(s);
+      });
+      
+      const currentDeviceCount = uniqueDevices.size;
+      
+      if (currentDeviceCount >= MAX_ALLOWED) {
+         const devicesToKickCount = currentDeviceCount - MAX_ALLOWED + 1;
+         const sortedDevices = Array.from(uniqueDevices.entries()).sort(([, sessionsA], [, sessionsB]) => {
+            const sessionA = sessionsA[0];
+            const sessionB = sessionsB[0];
+            if (!sessionA || !sessionB) return 0;
+            const timeA = sessionA.createdAt instanceof Date ? sessionA.createdAt.getTime() : new Date(sessionA.createdAt).getTime();
+            const timeB = sessionB.createdAt instanceof Date ? sessionB.createdAt.getTime() : new Date(sessionB.createdAt).getTime();
+            return timeA - timeB; 
+         });
+         
+         const devicesToKick = sortedDevices.slice(0, devicesToKickCount);
+         for (const [_, sessions] of devicesToKick) {
+            for (const s of sessions) {
+                const original = s.toJSON();
+                s.is_active = false;
+                s.revoked_at = new Date();
+                s.revoked_reason = 'MAX_DEVICES_EXCEEDED';
+                await s.save({ transaction: t });
+                kickedSessions.push({ original, updated: s.toJSON() });
+            }
+         }
+      }
+
+      await UserSession.create(
+        {
+          user_id: user.id,
+          device_id: deviceId,
+          device_name:
+            typeof deviceName === 'string' && deviceName.trim().length > 0
+              ? deviceName.trim().slice(0, 191)
+              : null,
+          user_agent: userAgent ? userAgent.slice(0, 255) : null,
+          ip_address: clientIp,
+          jwt_id: jti,
+          is_active: true,
+          last_active_at: new Date(),
+          fullname: (user as any).full_name || user.username,
+        },
+        { transaction: t }
+      );
+
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        jti,
+        deviceId: deviceId, 
+        tokenVersion: user.token_version, 
+      },
+      secret,
+      { expiresIn: (process.env.JWT_EXPIRES_IN || '8h') as any }
+    );
+
+    for (const entry of kickedSessions) {
+      await logAudit(
+        user.id,
+        'SESSION_FORCE_LOGOUT',
+        entry.original,
+        entry.updated,
+        clientIp || undefined
+      );
+      const updated: any = entry.updated;
+      const revokedAt =
+        updated.revoked_at instanceof Date
+          ? updated.revoked_at.toISOString()
+          : new Date().toISOString();
+      broadcastSessionRevoked(user.id, {
+        sessionId: updated.id,
+        deviceId: updated.device_id,
+        jwtId: updated.jwt_id || null,
+        reason: updated.revoked_reason || null,
+        revokedAt,
+      });
+    }
+
+    await logAudit(
+      user.id,
+      'LOGIN_SUCCESS',
+      null,
+      {
+        deviceId: deviceId,
+        jti,
+      },
+      clientIp || undefined
+    );
+
+    try {
+      const effectiveIp = clientIp || null;
+      await user.update({ last_login_at: new Date(), last_login_ip: effectiveIp });
+    } catch (e) {
+      console.error('Failed to update last login info:', e);
+    }
+
+    const encryptedToken = encrypt(token);
+
+    const parseDuration = (duration: string) => {
+      if (!duration) return 24 * 60 * 60 * 1000; 
+      const match = duration.match(/^(\d+)([dhms])?$/);
+      if (!match) return 24 * 60 * 60 * 1000;
+      const val = parseInt(match[1], 10);
+      const unit = match[2] || 'ms';
+      switch(unit) {
+        case 'd': return val * 24 * 60 * 60 * 1000;
+        case 'h': return val * 60 * 60 * 1000;
+        case 'm': return val * 60 * 1000;
+        case 's': return val * 1000;
+        default: return val;
+      }
+    };
+    const maxAge = parseDuration(process.env.JWT_EXPIRES_IN || '24h');
+
+    res.cookie('_T', encryptedToken, {
+      httpOnly: true,
+      secure: true, 
+      sameSite: 'none', 
+      maxAge: maxAge 
+    });
+
+    res.json({ 
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.full_name || user.username
+      }
+    });
+};
 
 const encodePermissionSlug = (slug: string): string => {
   let hash = 0;
@@ -265,200 +446,167 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const uaHeader = req.headers['user-agent'];
-    const userAgent = typeof uaHeader === 'string' ? uaHeader : null;
+    const isSetupRequired = !user.two_factor_enabled;
+    const stage = isSetupRequired ? '2fa_setup' : '2fa_verify';
 
-    const jti = crypto.randomBytes(16).toString('hex');
-
-    const t = await sequelize.transaction();
-    let kickedSessions: { original: any; updated: any }[] = [];
-
-    try {
-      const activeSessions = await UserSession.findAll({
-        where: {
-          user_id: user.id,
-          is_active: true,
-        },
-        order: [['createdAt', 'ASC']],
-        transaction: t,
-        lock: t.LOCK.UPDATE as any,
-      });
-
-      for (const s of activeSessions.filter((s) => s.device_id === effectiveDeviceId)) {
-        const original = s.toJSON();
-        s.is_active = false;
-        s.revoked_at = new Date();
-        s.revoked_reason = 'REPLACED_BY_NEW_LOGIN';
-        await s.save({ transaction: t });
-        kickedSessions.push({ original, updated: s.toJSON() });
-      }
-
-      const remaining = activeSessions.filter((s) => s.device_id !== effectiveDeviceId);
-
-      // Enforce Max Devices Policy (Kick Oldest)
-      // We want to allow MAX_DEVICES_PER_USER devices.
-      // If we are about to add 1 new device, we must ensure existing active devices <= MAX - 1.
-      
-      const MAX_ALLOWED = MAX_DEVICES_PER_USER; 
-      // Filter out sessions that are already marked for replacement (same device ID)
-      // 'remaining' contains sessions from OTHER devices that are currently active.
-      // We group them by device_id because one device might technically have multiple sessions if cleanup failed, 
-      // but ideally we treat unique device_id as unique device.
-      
-      const uniqueDevices = new Map<string, typeof remaining>();
-      remaining.forEach(s => {
-        if (!uniqueDevices.has(s.device_id)) {
-           uniqueDevices.set(s.device_id, []);
-        }
-        uniqueDevices.get(s.device_id)?.push(s);
-      });
-      
-      const currentDeviceCount = uniqueDevices.size;
-      
-      if (currentDeviceCount >= MAX_ALLOWED) {
-         // We need to kick (currentDeviceCount - MAX_ALLOWED + 1) devices to make room
-         const devicesToKickCount = currentDeviceCount - MAX_ALLOWED + 1;
-         
-         // Sort devices by their most recent activity or creation time to find the oldest
-         // We use the oldest session's createdAt as a proxy for "device added at"
-         const sortedDevices = Array.from(uniqueDevices.entries()).sort(([, sessionsA], [, sessionsB]) => {
-            // Safety check: ensure sessions arrays are not empty
-            const sessionA = sessionsA[0];
-            const sessionB = sessionsB[0];
-            
-            if (!sessionA || !sessionB) return 0;
-
-            const timeA = sessionA.createdAt instanceof Date ? sessionA.createdAt.getTime() : new Date(sessionA.createdAt).getTime();
-            const timeB = sessionB.createdAt instanceof Date ? sessionB.createdAt.getTime() : new Date(sessionB.createdAt).getTime();
-            return timeA - timeB; // Ascending: Oldest first
-         });
-         
-         const devicesToKick = sortedDevices.slice(0, devicesToKickCount);
-         
-         for (const [_, sessions] of devicesToKick) {
-            for (const s of sessions) {
-                const original = s.toJSON();
-                s.is_active = false;
-                s.revoked_at = new Date();
-                s.revoked_reason = 'MAX_DEVICES_EXCEEDED';
-                await s.save({ transaction: t });
-                kickedSessions.push({ original, updated: s.toJSON() });
-            }
-         }
-      }
-
-      await UserSession.create(
-        {
-          user_id: user.id,
-          device_id: effectiveDeviceId,
-          device_name:
-            typeof deviceName === 'string' && deviceName.trim().length > 0
-              ? deviceName.trim().slice(0, 191)
-              : null,
-          user_agent: userAgent ? userAgent.slice(0, 255) : null,
-          ip_address: clientIp,
-          jwt_id: jti,
-          is_active: true,
-          last_active_at: new Date(),
-          fullname: (user as any).full_name || user.username,
-        },
-        { transaction: t }
-      );
-
-      await t.commit();
-    } catch (err) {
-      await t.rollback();
-      throw err;
-    }
-
-    const token = jwt.sign(
+    const preAuthToken = jwt.sign(
       {
         id: user.id,
         username: user.username,
-        jti,
-        deviceId: effectiveDeviceId, // Bind Token to Device ID
-        tokenVersion: user.token_version, // Include current token version
-      },
-      secret,
-      { expiresIn: (process.env.JWT_EXPIRES_IN || '8h') as any }
-    );
-
-    for (const entry of kickedSessions) {
-      await logAudit(
-        user.id,
-        'SESSION_FORCE_LOGOUT',
-        entry.original,
-        entry.updated,
-        clientIp || undefined
-      );
-      const updated: any = entry.updated;
-      const revokedAt =
-        updated.revoked_at instanceof Date
-          ? updated.revoked_at.toISOString()
-          : new Date().toISOString();
-      broadcastSessionRevoked(user.id, {
-        sessionId: updated.id,
-        deviceId: updated.device_id,
-        jwtId: updated.jwt_id || null,
-        reason: updated.revoked_reason || null,
-        revokedAt,
-      });
-    }
-
-    await logAudit(
-      user.id,
-      'LOGIN_SUCCESS',
-      null,
-      {
+        stage,
         deviceId: effectiveDeviceId,
-        jti,
+        deviceName: typeof deviceName === 'string' && deviceName.trim().length > 0 ? deviceName.trim().slice(0, 191) : null
       },
-      clientIp || undefined
+      PRE_AUTH_SECRET,
+      { expiresIn: '10m' }
     );
 
-    // Update last login info
-    try {
-      const effectiveIp = clientIp || null;
-      await user.update({ last_login_at: new Date(), last_login_ip: effectiveIp });
-    } catch (e) {
-      console.error('Failed to update last login info:', e);
-    }
-
-    // Encrypt the token before setting it in the cookie
-    const encryptedToken = encrypt(token);
-
-    // Parse JWT_EXPIRES_IN to milliseconds for cookie maxAge
-    // Assuming format like '12h', '1d', '30m' or plain ms number
-    const parseDuration = (duration: string) => {
-      if (!duration) return 24 * 60 * 60 * 1000; // Default 1 day
-      const match = duration.match(/^(\d+)([dhms])?$/);
-      if (!match) return 24 * 60 * 60 * 1000;
-      const val = parseInt(match[1], 10);
-      const unit = match[2] || 'ms';
-      switch(unit) {
-        case 'd': return val * 24 * 60 * 60 * 1000;
-        case 'h': return val * 60 * 60 * 1000;
-        case 'm': return val * 60 * 1000;
-        case 's': return val * 1000;
-        default: return val;
-      }
-    };
-    const maxAge = parseDuration(process.env.JWT_EXPIRES_IN || '24h');
-
-    res.cookie('_T', encryptedToken, {
-      httpOnly: true,
-      secure: true, // Always secure for cross-site (even if dev, if we want to simulate prod behavior)
-      sameSite: 'none', // Required for cross-site cookie (frontend domain != backend domain)
-      maxAge: maxAge 
-    });
-
-    res.json({ 
-      success: true
+    res.json({
+      require2fa: true,
+      setupRequired: isSetupRequired,
+      token: preAuthToken
     });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
+};
+
+export const setup2FA = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { token } = req.body;
+        if (!token) {
+             res.status(400).json({ message: 'Token is required' });
+             return;
+        }
+
+        let decoded: any;
+        try {
+            decoded = jwt.verify(token, PRE_AUTH_SECRET);
+        } catch (e) {
+             res.status(401).json({ message: 'Invalid or expired token' });
+             return;
+        }
+
+        if (decoded.stage !== '2fa_setup') {
+             res.status(400).json({ message: 'Invalid stage for setup' });
+             return;
+        }
+
+        const user = await User.findByPk(decoded.id);
+        const displayName = user?.full_name || decoded.username || 'User';
+
+        const secret = speakeasy.generateSecret({ length: 20, name: `AIPlatform (${displayName})` });
+        
+        // Store secret in cache for verification step (10 mins)
+        setCache(`2fa_setup_secret:${decoded.id}`, secret.base32, 600);
+
+        const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url || '');
+
+        res.json({
+            secret: secret.base32,
+            qrCode: qrCodeUrl
+        });
+
+    } catch (error) {
+        console.error('Setup 2FA error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+export const verify2FA = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { token, code } = req.body;
+        const clientIp = getClientIp(req);
+
+        if (!token || !code) {
+             res.status(400).json({ message: 'Token and code are required' });
+             return;
+        }
+
+        let decoded: any;
+        try {
+            decoded = jwt.verify(token, PRE_AUTH_SECRET);
+        } catch (e) {
+             res.status(401).json({ message: 'Invalid or expired token' });
+             return;
+        }
+
+        const user: any = await User.findOne({ 
+          where: { id: decoded.id },
+          include: [
+            Permission,
+            {
+              model: Role,
+              include: [Permission]
+            }
+          ]
+        });
+
+        if (!user) {
+             res.status(404).json({ message: 'User not found' });
+             return;
+        }
+
+        if (decoded.stage === '2fa_setup') {
+             // Verify against cached secret
+             const cachedSecret = getCache(`2fa_setup_secret:${user.id}`);
+             if (!cachedSecret) {
+                 res.status(400).json({ message: 'Setup session expired. Please login again.' });
+                 return;
+             }
+
+             const verified = speakeasy.totp.verify({
+                 secret: cachedSecret as string,
+                 encoding: 'base32',
+                 token: code
+             });
+
+             if (!verified) {
+                 res.status(401).json({ message: 'Invalid code' });
+                 return;
+             }
+
+             // Save to user
+             user.two_factor_secret = encrypt(cachedSecret as string);
+             user.two_factor_enabled = true;
+             await user.save();
+             
+             invalidateCache(`2fa_setup_secret:${user.id}`);
+             
+             await logAudit(user.id, '2FA_SETUP_SUCCESS', null, null, clientIp || undefined);
+
+        } else if (decoded.stage === '2fa_verify') {
+             if (!user.two_factor_enabled || !user.two_factor_secret) {
+                 // Should not happen if logic is correct, but safe fallback
+                 res.status(400).json({ message: '2FA not enabled for this user' });
+                 return;
+             }
+
+             const secret = decrypt(user.two_factor_secret);
+             const verified = speakeasy.totp.verify({
+                 secret,
+                 encoding: 'base32',
+                 token: code
+             });
+
+             if (!verified) {
+                 await logAudit(user.id, '2FA_VERIFY_FAILED', null, null, clientIp || undefined);
+                 res.status(401).json({ message: 'Invalid code' });
+                 return;
+             }
+        } else {
+             res.status(400).json({ message: 'Invalid stage' });
+             return;
+        }
+
+        // Success - Finalize Login
+        await finalizeLogin(user, req, res, decoded.deviceId, decoded.deviceName, clientIp);
+
+    } catch (error) {
+        console.error('Verify 2FA error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {

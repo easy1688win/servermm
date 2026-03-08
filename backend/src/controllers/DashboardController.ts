@@ -23,6 +23,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     const canViewBalance = permissions.includes('view:bank_balance');
     const canViewFullAccount = permissions.includes('view:bank_full_account');
     const canViewProfit = permissions.includes('view:player_profit');
+    const canViewFinancials = permissions.includes('view:dashboard_financials');
 
     const [banksResult, playersResult, transactionsResult, gamesResult] = await Promise.allSettled([
       BankAccount.findAll(),
@@ -299,9 +300,9 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         bankName: bank.bank_name,
         alias: bank.alias ?? null,
         accountNumberDisplay: bank.account_number_display ?? null,
-        depositsAmount: agg.depositsAmount,
+        depositsAmount: canViewFinancials ? agg.depositsAmount : null,
         depositsCount: agg.depositsCount,
-        withdrawalsAmount: agg.withdrawalsAmount,
+        withdrawalsAmount: canViewFinancials ? agg.withdrawalsAmount : null,
         withdrawalsCount: agg.withdrawalsCount,
         balance: bank.total_balance != null ? Number(bank.total_balance) : 0,
       };
@@ -319,15 +320,27 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         gameId: g.id,
         gameName: g.name,
         icon: g.icon,
-        depositsAmount: agg.depositsAmount,
+        depositsAmount: canViewFinancials ? agg.depositsAmount : null,
         depositsCount: agg.depositsCount,
-        withdrawalsAmount: agg.withdrawalsAmount,
+        withdrawalsAmount: canViewFinancials ? agg.withdrawalsAmount : null,
         withdrawalsCount: agg.withdrawalsCount,
         balance: g.balance,
       };
     });
 
-    const staffPerformance = Array.from(staffMap.values());
+    const staffPerformance = Array.from(staffMap.values()).map(s => ({
+      ...s,
+      volume: canViewFinancials ? s.volume : null
+    }));
+
+    // Mask sensitive financial totals if no permission
+    const finalStats = {
+      ...stats,
+      totalDeposits: canViewFinancials ? stats.totalDeposits : null,
+      totalWithdrawals: canViewFinancials ? stats.totalWithdrawals : null,
+      netCashFlow: canViewFinancials ? stats.netCashFlow : null,
+      totalBonus: canViewFinancials ? stats.totalBonus : null,
+    };
 
     const recentTransactions = transactions
       .slice(0, 5)
@@ -342,8 +355,8 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         return {
           id: t.id,
           type: t.type,
-          amount: t.amount,
-          bonus: bonusForRecent,
+          amount: canViewFinancials ? t.amount : null, // Mask amount in recent transactions too? User didn't specify recent transactions but likely implied. Let's keep consistent.
+          bonus: canViewFinancials ? bonusForRecent : null,
           date: t.date,
           playerGameId: t.playerGameId,
           operatorName: t.operatorName,
@@ -356,7 +369,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
 
     const summary = {
       generatedAt: now.toISOString(),
-      stats,
+      stats: finalStats,
       bankReports,
       kioskReports,
       staffPerformance,

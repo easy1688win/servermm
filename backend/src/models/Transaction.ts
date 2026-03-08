@@ -99,6 +99,20 @@ Transaction.init({
       if (!transaction.id) {
         transaction.id = generateTransactionId();
       }
+
+      // Enforce validation for game-related transactions
+      if (['DEPOSIT', 'WITHDRAWAL', 'WALVE'].includes(transaction.type)) {
+        if (!transaction.player_id) {
+          throw new Error('Player is required for this transaction type');
+        }
+        if (!transaction.game_id) {
+          throw new Error('Game is required for this transaction type');
+        }
+        if (!transaction.game_account_id) {
+          throw new Error('Game Account is required for this transaction type');
+        }
+      }
+
       if (transaction.remark && !isEncrypted(transaction.remark)) {
         transaction.remark = encrypt(transaction.remark);
       }
