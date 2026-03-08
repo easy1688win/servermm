@@ -7,7 +7,17 @@ export const getAll = async (req: AuthRequest, res: Response): Promise<void> => 
     const settings = await Setting.findAll();
     const result: Record<string, any> = {};
     settings.forEach((s: any) => {
-      result[s.key] = s.value;
+      // Handle potential double-encoding or stringified JSON from DB
+      let val = s.value;
+      if (typeof val === 'string' && (val.startsWith('[') || val.startsWith('{'))) {
+        try {
+          const parsed = JSON.parse(val);
+          val = parsed;
+        } catch (e) {
+          // ignore
+        }
+      }
+      result[s.key] = val;
     });
     res.json(result);
   } catch (error) {

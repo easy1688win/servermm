@@ -14,6 +14,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://antmarkerting.pages.dev',
+    'https://admin-1mo.pages.dev',
     'https://api.megainfinite88.com',
     'https://v1.megainfinite88.com'
   ],

@@ -62,24 +62,61 @@ Player.init({
       if (!instances) return;
       
       const decryptInstance = (inst: Player) => {
-        if (inst.metadata && typeof inst.metadata === 'string') {
-          // Check if it looks encrypted to avoid unnecessary decrypt calls
-          if (isEncrypted(inst.metadata)) {
+        if (inst.metadata) {
+          let strValue = inst.metadata;
+          
+          // Case 1: It's already an object (JSON field parsed by Sequelize)
+          if (typeof strValue !== 'string') {
+             // Even if it's an object, we need to be careful. 
+             // If we previously stored an encrypted string as a JSON string (e.g. "\"81acdb...\""), 
+             // Sequelize might parse it as a string literal, so strValue would be that encrypted string.
+             // But if typeof is NOT string, it means it's an object/array/null.
+             
+             // If it's a plain object, it's decrypted data. We are good.
+             return; 
+          }
+
+          // Case 2: It is a string. It could be:
+          // a) The raw encrypted string (e.g. "81acdb...")
+          // b) A JSON-stringified encrypted string (e.g. "\"81acdb...\"") - double encoded
+          // c) A JSON-stringified object (e.g. "{\"name\":\"...\"}")
+
+          // Try to handle double-encoding (JSON string containing the encrypted string)
+          if (strValue.startsWith('"') && strValue.endsWith('"')) {
             try {
-              const decrypted = decrypt(inst.metadata);
-              inst.metadata = JSON.parse(decrypted);
+              const parsed = JSON.parse(strValue);
+              if (typeof parsed === 'string') {
+                strValue = parsed;
+              }
             } catch (e) {
-              // Fallback to original string or try to parse it as JSON directly
+              // Not a valid JSON string, treat as raw string
+            }
+          }
+
+          // Now check if this string is encrypted
+          if (isEncrypted(strValue)) {
+            try {
+              const decrypted = decrypt(strValue);
+              // Attempt to parse the decrypted string as JSON
               try {
-                 inst.metadata = JSON.parse(inst.metadata); 
+                inst.metadata = JSON.parse(decrypted);
+              } catch (jsonError) {
+                // If decrypted content is not valid JSON, keep it as string
+                inst.metadata = decrypted;
+              }
+            } catch (e) {
+              // Decryption failed. 
+              // Fallback: try to parse the original string as JSON
+              try {
+                 inst.metadata = JSON.parse(strValue); 
               } catch (e2) {
-                 // ignore
+                 // ignore, keep as is
               }
             }
           } else {
             // Not encrypted, try to parse as JSON if it's a string
             try {
-               inst.metadata = JSON.parse(inst.metadata); 
+               inst.metadata = JSON.parse(strValue); 
             } catch (e2) {
                // ignore
             }

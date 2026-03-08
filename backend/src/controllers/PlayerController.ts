@@ -411,6 +411,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
               typeof u.full_name === 'string' && u.full_name.trim().length > 0
                 ? u.full_name.trim()
                 : null,
+            username: u.username // Also store username
           },
         ])
     );
@@ -561,8 +562,9 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       let createdByFullName: string | null = null;
       if (typeof createdByUserId === 'number' && Number.isFinite(createdByUserId)) {
         const u = createdByUserMap.get(createdByUserId);
-        if (u && u.full_name) {
-          createdByFullName = u.full_name;
+        if (u) {
+          // Prioritize full_name, fallback to username if full_name is missing/empty
+          createdByFullName = u.full_name || u.username || null;
         }
       }
       const metadata = {
@@ -596,10 +598,20 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         totalWithdraw: r.totalWithdraw,
       }));
 
+      let tags = json.tags;
+      if (typeof tags === 'string') {
+        try {
+          tags = JSON.parse(tags);
+        } catch (e) {
+          tags = [];
+        }
+      }
+      if (!Array.isArray(tags)) tags = [];
+
       return {
         id: json.id,
         player_game_id: json.player_game_id,
-        tags: Array.isArray(json.tags) ? json.tags : [],
+        tags,
         metadata,
         netProfit,
         created_at: json.created_at || json.createdAt || null,
@@ -654,14 +666,28 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
        }
     }
 
-    const referralValue = referralSetting?.get('value') as any;
+    let referralValue = referralSetting?.get('value') as any;
+    // Handle double-encoded JSON string for referralSources
+    if (typeof referralValue === 'string' && referralValue.startsWith('[')) {
+      try {
+        referralValue = JSON.parse(referralValue);
+      } catch (e) { /* ignore */ }
+    }
+
     const referralSourceOptions = Array.isArray(referralValue)
       ? referralValue.filter(
           (v: any) => typeof v === 'string' && v.trim().length > 0
         )
       : [];
 
-    const tagValue = tagSetting?.get('value') as any;
+    let tagValue = tagSetting?.get('value') as any;
+    // Handle double-encoded JSON string for tagOptions
+    if (typeof tagValue === 'string' && tagValue.startsWith('[')) {
+      try {
+        tagValue = JSON.parse(tagValue);
+      } catch (e) { /* ignore */ }
+    }
+
     const tagOptions = Array.isArray(tagValue)
       ? tagValue
           .filter((t: any) => t && typeof t.name === 'string')

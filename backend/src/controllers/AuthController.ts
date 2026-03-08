@@ -322,8 +322,14 @@ export const login = async (req: Request, res: Response): Promise<void> => {
          // Sort devices by their most recent activity or creation time to find the oldest
          // We use the oldest session's createdAt as a proxy for "device added at"
          const sortedDevices = Array.from(uniqueDevices.entries()).sort(([, sessionsA], [, sessionsB]) => {
-            const timeA = sessionsA[0].createdAt.getTime();
-            const timeB = sessionsB[0].createdAt.getTime();
+            // Safety check: ensure sessions arrays are not empty
+            const sessionA = sessionsA[0];
+            const sessionB = sessionsB[0];
+            
+            if (!sessionA || !sessionB) return 0;
+
+            const timeA = sessionA.createdAt instanceof Date ? sessionA.createdAt.getTime() : new Date(sessionA.createdAt).getTime();
+            const timeB = sessionB.createdAt instanceof Date ? sessionB.createdAt.getTime() : new Date(sessionB.createdAt).getTime();
             return timeA - timeB; // Ascending: Oldest first
          });
          
