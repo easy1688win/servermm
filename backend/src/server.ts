@@ -14,7 +14,8 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://antmarkerting.pages.dev',
-    'https://api.megainfinite88.com'
+    'https://api.megainfinite88.com',
+    'https://v1.megainfinite88.com'
   ],
   credentials: true,
 }));
@@ -28,7 +29,74 @@ app.set('trust proxy', 1);
 app.use('/api', routes);
 
 app.get('/', (req, res) => {
-  res.send('');
+  res.status(403).send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>403 - Forbidden: Access is denied</title>
+      <style>
+        body {
+          margin: 0;
+          padding: 0;
+          background-color: #09090b;
+          color: #e4e4e7;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+        }
+        .container {
+          text-align: center;
+          padding: 2rem;
+          border: 1px solid #27272a;
+          border-radius: 0.5rem;
+          background-color: #18181b;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+          max-width: 400px;
+          width: 90%;
+        }
+        .icon {
+          color: #ef4444;
+          margin-bottom: 1rem;
+        }
+        h1 {
+          font-size: 1.5rem;
+          font-weight: 600;
+          margin-bottom: 0.5rem;
+          color: #fff;
+        }
+        p {
+          color: #a1a1aa;
+          font-size: 0.875rem;
+          line-height: 1.5;
+        }
+        .footer {
+          margin-top: 1.5rem;
+          font-size: 0.75rem;
+          color: #52525b;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+        </div>
+        <h1>403 - Forbidden: Access is denied</h1>
+        <p>You do not have permission to view this directory or page using the credentials that you supplied. </p>
+        <div class="footer">
+          Warning: All activities are monitored and logged.
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
 });
 
 const startServer = async () => {
