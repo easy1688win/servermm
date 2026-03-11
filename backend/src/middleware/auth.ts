@@ -63,9 +63,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       // Ideally, the frontend should also send x-device-id header to cross-verify, 
       // but validating against the DB session record is the most secure backend-enforced check.
       if (tokenDeviceId && session.device_id !== tokenDeviceId) {
-         // Token stolen and used on another device? Or session hijacked?
-         console.warn(`Token Device ID mismatch! Token: ${tokenDeviceId}, Session: ${session.device_id}, User: ${userId}`);
-         
+         // Token stolen and used on another device? Or session hijacked?         
          // Auto-revoke this session as it is compromised
          session.is_active = false;
          session.revoked_at = new Date();

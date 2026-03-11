@@ -39,8 +39,7 @@ export const getAllGames = async (req: AuthRequest, res: Response): Promise<void
     }));
     res.json(formatted);
   } catch (error) {
-    console.error('Error fetching games:', error);
-    res.status(500).json({ message: 'Error fetching games' });
+    res.status(500).json({ message: 'G103' });
   }
 };
 
@@ -93,7 +92,7 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
     });
   } catch (error) {
     console.error('Error fetching games context:', error);
-    res.status(500).json({ message: 'Error fetching games context' });
+    res.status(500).json({ message: 'G104' });
   }
 };
 
@@ -102,7 +101,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
     const { name, balance, icon } = req.body;
     
     if (!name) {
-      res.status(400).json({ message: 'Game name is required' });
+      res.status(400).json({ message: 'G105' });
       return;
     }
 
@@ -157,7 +156,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
         return;
       }
 
-      res.status(400).json({ message: 'Game with this name already exists' });
+      res.status(400).json({ message: 'G106' });
       return;
     }
 
@@ -171,7 +170,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
     res.status(201).json({ id: game.id, name: game.name, balance: Number(game.balance), icon: game.icon, status: game.status });
   } catch (error) {
     console.error('Error creating game:', error);
-    res.status(500).json({ message: 'Error creating game' });
+    res.status(500).json({ message: 'G107' });
   }
 };
 
@@ -181,12 +180,12 @@ export const deleteGame = async (req: AuthRequest, res: Response): Promise<void>
     const game = await Game.findByPk(Number(id));
     
     if (!game) {
-      res.status(404).json({ message: 'Game not found' });
+      res.status(404).json({ message: 'G101' });
       return;
     }
 
     if (game.status === 'inactive') {
-      res.json({ message: 'Game already inactive' });
+      res.json({ message: 'G108' });
       return;
     }
 
@@ -203,7 +202,7 @@ export const deleteGame = async (req: AuthRequest, res: Response): Promise<void>
 
     await logAudit(
       req.user?.id || null,
-      'GAME_ARCHIVE',
+      'GAME_DELETE',
       original,
       {
         id: game.id,
@@ -215,10 +214,50 @@ export const deleteGame = async (req: AuthRequest, res: Response): Promise<void>
       getClientIp(req) || undefined,
     );
 
-    res.json({ message: 'Game set to inactive' });
+    res.json({ message: 'G109' });
   } catch (error) {
-    console.error('Error deleting game:', error);
-    res.status(500).json({ message: 'Error deleting game' });
+    res.status(500).json({ message: 'G110' });
+  }
+};
+
+export const update = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { icon } = req.body;
+    
+    const game = await Game.findByPk(Number(id));
+    if (!game) {
+      res.status(404).json({ message: 'G101' });
+      return;
+    }
+
+    const original = game.toJSON();
+    
+    // Only update icon if provided
+    if (icon !== undefined) {
+      game.icon = icon;
+    }
+    
+    await game.save();
+
+    await logAudit(
+      req.user?.id || null,
+      'GAME_UPDATE',
+      original,
+      game.toJSON(),
+      getClientIp(req) || undefined,
+    );
+
+    res.json({
+      id: game.id,
+      name: game.name,
+      icon: game.icon,
+      status: game.status,
+      balance: Number(game.balance)
+    });
+  } catch (error) {
+    console.error('Error updating game:', error);
+    res.status(500).json({ message: 'G102' });
   }
 };
 
@@ -236,7 +275,7 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     } as any);
     if (!game) {
       await t.rollback();
-      res.status(404).json({ message: 'Game not found' });
+      res.status(404).json({ message: 'G101' });
       return;
     }
 
@@ -249,13 +288,13 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     } else if (type === 'OUT') {
       if (beforeBalance < adjustmentAmount) {
         await t.rollback();
-        res.status(400).json({ message: 'Insufficient funds' });
+        res.status(400).json({ message: 'G111' });
         return;
       }
       afterBalance -= adjustmentAmount;
     } else {
       await t.rollback();
-      res.status(400).json({ message: 'Invalid adjustment type' });
+      res.status(400).json({ message: 'G112' });
       return;
     }
 
@@ -282,7 +321,7 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
   } catch (error) {
     await t.rollback();
     console.error('Error adjusting game balance:', error);
-    res.status(500).json({ message: 'Error adjusting balance' });
+    res.status(500).json({ message: 'G113' });
   }
 };
 
@@ -325,6 +364,6 @@ export const getGameAdjustments = async (req: AuthRequest, res: Response): Promi
     res.json(formatted);
   } catch (error) {
     console.error('Error fetching game adjustments:', error);
-    res.status(500).json({ message: 'Error fetching adjustments' });
+    res.status(500).json({ message: 'G114' });
   }
 };

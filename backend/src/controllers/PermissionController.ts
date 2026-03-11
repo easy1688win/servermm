@@ -6,7 +6,6 @@ export const getAllPermissions = async (req: Request, res: Response): Promise<vo
     const permissions = await Permission.findAll();
     res.json(permissions);
   } catch (error) {
-    console.error('Error fetching permissions:', error);
     res.status(500).json({ message: 'Error fetching permissions' });
   }
 };

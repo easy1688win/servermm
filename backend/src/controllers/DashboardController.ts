@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { Op } from 'sequelize';
 import { AuthRequest } from '../middleware/auth';
-import { BankAccount, Player, Transaction, User, Game } from '../models';
+import { BankAccount, Player, Transaction, User, Game, BankCatalog } from '../models';
 import { getCache, setCache } from '../services/CacheService';
 import { decrypt, isEncrypted } from '../utils/encryption';
 
@@ -25,7 +25,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     const canViewProfit = permissions.includes('view:player_profit');
     const canViewFinancials = permissions.includes('view:dashboard_financials');
 
-    const [banksResult, playersResult, transactionsResult, gamesResult] = await Promise.allSettled([
+    const [banksResult, playersResult, transactionsResult, gamesResult, bankCatalogResult] = await Promise.allSettled([
       BankAccount.findAll(),
       Player.findAll({
         attributes: ['id', 'player_game_id', 'createdAt'],
@@ -45,12 +45,25 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       Game.findAll({
         where: { status: 'active' },
       } as any),
+      BankCatalog.findAll({
+        order: [['name', 'ASC']]
+      }),
     ]);
 
     const banksRaw = banksResult.status === 'fulfilled' ? banksResult.value : [];
     const playersRaw = playersResult.status === 'fulfilled' ? playersResult.value : [];
     const transactionsRaw = transactionsResult.status === 'fulfilled' ? transactionsResult.value : [];
     const gamesRaw = gamesResult.status === 'fulfilled' ? gamesResult.value : [];
+    const bankCatalogRaw = bankCatalogResult.status === 'fulfilled' ? bankCatalogResult.value : [];
+
+    // Create bank catalog map for icon lookup (case-insensitive and trimmed)
+    const bankCatalogMap = new Map<string, string | null>();
+    (bankCatalogRaw as any[]).forEach((catalog: any) => {
+      const normalizedName = catalog.name ? catalog.name.toString().trim().toLowerCase() : '';
+      if (normalizedName) {
+        bankCatalogMap.set(normalizedName, catalog.icon);
+      }
+    });
 
     const banks = (banksRaw as any[])
       .filter(account => account.status !== 'banned')
@@ -295,11 +308,15 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         withdrawalsCount: 0,
       };
 
+      const normalizedName = bank.bank_name?.toString().trim().toLowerCase() || '';
+      const icon = bankCatalogMap.get(normalizedName) ?? null;
+
       return {
         bankId,
         bankName: bank.bank_name,
         alias: bank.alias ?? null,
         accountNumberDisplay: bank.account_number_display ?? null,
+        icon: icon,
         depositsAmount: canViewFinancials ? agg.depositsAmount : null,
         depositsCount: agg.depositsCount,
         withdrawalsAmount: canViewFinancials ? agg.withdrawalsAmount : null,
@@ -379,13 +396,13 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         players: playersResult.status === 'rejected',
         transactions: transactionsResult.status === 'rejected',
         games: gamesResult.status === 'rejected',
+        bankCatalog: bankCatalogResult.status === 'rejected',
       },
     };
 
     setCache(cacheKey, summary, 30);
     res.json(summary);
   } catch (error) {
-    console.error('Failed to build dashboard summary', error);
     res.status(500).json({ message: 'Failed to load dashboard summary' });
   }
 };

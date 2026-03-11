@@ -127,9 +127,24 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
 
 export const getUsersContext = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const roles = await Role.findAll({
+    // Check if requester is Super Admin
+    const requesterId = req.user?.id;
+    const requester = await User.findByPk(requesterId, {
+      include: [{ model: Role, through: { attributes: [] } }]
+    });
+    
+    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    
+    // Get roles with permission filtering
+    let roles = await Role.findAll({
         include: [Permission]
     });
+    
+    // Filter roles: non-superadmin users cannot see Super Admin role
+    if (!isSuperAdmin) {
+        roles = roles.filter(role => role.name !== 'Super Admin');
+    }
+    
     const permissions = await Permission.findAll();
     
     // Also return users as part of the context since the frontend expects it
@@ -137,12 +152,6 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
     // Looking at the previous code provided by user, getUsersContext returned users too.
     
     // Reuse logic from getUsers but without response sending
-    const requesterId = req.user?.id;
-    const requester = await User.findByPk(requesterId, {
-      include: [{ model: Role, through: { attributes: [] } }]
-    });
-    
-    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
     const userPermissions = (req.user?.permissions || []) as string[];
     const canViewOthers = userPermissions.includes('action:user_view');
     const canViewFullIp = userPermissions.includes('view:full_ip');
@@ -232,6 +241,22 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
   try {
     const { username, password, full_name, fullName, roles, permissions, currency } = req.body;
     
+    // Check if requester is Super Admin
+    const requesterId = req.user?.id;
+    const requester = await User.findByPk(requesterId, {
+      include: [{ model: Role, through: { attributes: [] } }]
+    });
+    
+    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    
+    // Validate roles: non-superadmin users cannot assign Super Admin role
+    if (roles && Array.isArray(roles)) {
+        if (!isSuperAdmin && roles.includes('Super Admin')) {
+            res.status(403).json({ message: 'Access denied: Cannot assign Super Admin role' });
+            return;
+        }
+    }
+    
     const existing = await User.findOne({ where: { username } });
     if (existing) {
         res.status(400).json({ message: 'Username already exists' });
@@ -294,6 +319,22 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     // Map frontend payload keys to what we need
     // Frontend sends: username, fullName, status, roles (array of strings), password
     const { password, full_name, fullName, roles, permissions, status, currency } = req.body;
+    
+    // Check if requester is Super Admin
+    const requesterId = req.user?.id;
+    const requester = await User.findByPk(requesterId, {
+      include: [{ model: Role, through: { attributes: [] } }]
+    });
+    
+    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    
+    // Validate roles: non-superadmin users cannot assign Super Admin role
+    if (roles && Array.isArray(roles)) {
+        if (!isSuperAdmin && roles.includes('Super Admin')) {
+            res.status(403).json({ message: 'Access denied: Cannot assign Super Admin role' });
+            return;
+        }
+    }
     
     const userId = Number(id);
     if (isNaN(userId)) {
@@ -455,7 +496,7 @@ export const reset2FA = async (req: AuthRequest, res: Response): Promise<void> =
         // Invalidate any setup cache
         invalidateCache(`2fa_setup_secret:${user.id}`);
 
-        await logAudit(requesterId, '2FA_RESET', { targetUserId: user.id, targetUsername: user.username }, null, getClientIp(req));
+        await logAudit(requesterId, 'TWOFA_RESET', { targetUserId: user.id, targetUsername: user.username }, null, getClientIp(req));
 
         res.json({ message: '2FA reset successfully' });
     } catch (error) {
