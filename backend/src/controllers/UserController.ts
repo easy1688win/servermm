@@ -318,7 +318,7 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     const { id } = req.params;
     // Map frontend payload keys to what we need
     // Frontend sends: username, fullName, status, roles (array of strings), password
-    const { password, full_name, fullName, roles, permissions, status, currency } = req.body;
+    const { username, password, full_name, fullName, roles, permissions, status, currency } = req.body;
     
     // Check if requester is Super Admin
     const requesterId = req.user?.id;
@@ -349,6 +349,17 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     }
 
     const original = user.toJSON();
+
+    // Check if username is being updated and validate it
+    if (username !== undefined && username !== user.username) {
+      // Check if new username already exists
+      const existingUser = await User.findOne({ where: { username } });
+      if (existingUser) {
+        res.status(400).json({ message: 'Username already exists' });
+        return;
+      }
+      user.username = username;
+    }
 
     if (password) {
         user.password_hash = await bcrypt.hash(password, 10);
