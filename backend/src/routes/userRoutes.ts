@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getUsers, getUsersContext, createUser, updateUser, deleteUser, rotateUserApiKey } from '../controllers/UserController';
+import { getUsers, getUsersContext, createUser, updateUser, deleteUser, rotateUserApiKey, reset2FA } from '../controllers/UserController';
 import { authenticateToken } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 
@@ -47,5 +47,6 @@ router.delete(
   deleteUser
 );
 router.post('/:id/api-key/rotate', requirePermission('action:user_api_manage'), rotateUserApiKey);
+router.post('/:id/2fa/reset', requirePermission('action:security_manage'), reset2FA);
 
 export default router;

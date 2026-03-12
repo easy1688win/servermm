@@ -14,6 +14,7 @@ const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT } = process.env;
 const PERMISSIONS = [
   // --- Routes ---
   { slug: 'route:dashboard', description: 'Access Dashboard' },
+  { slug: 'view:dashboard_financials', description: 'View Dashboard Financials' },
   { slug: 'route:transactions', description: 'Access Transactions' },
   { slug: 'route:transaction_history', description: 'Access Transaction History' },
   { slug: 'route:banks', description: 'Access Banks' },
@@ -60,7 +61,8 @@ const PERMISSIONS = [
   { slug: 'action:role_manage', description: 'Manage Roles' },
   { slug: 'action:settings_manage', description: 'Manage Settings' },
   { slug: 'action:device_session_revoke', description: 'Revoke device sessions for own account' },
-  { slug: 'action:device_fingerprint_lock', description: 'Lock device fingerprint for an account' }
+  { slug: 'action:device_fingerprint_lock', description: 'Lock device fingerprint for an account' },
+  { slug: 'action:security_manage', description: 'Manage Security Settings (2FA, etc.)' }
 ];
 
 const ROLES = [

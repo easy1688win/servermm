@@ -11,6 +11,7 @@ import gameRoutes from './gameRoutes';
 import bankCatalogRoutes from './bankCatalogRoutes';
 import settingRoutes from './settingRoutes';
 import dashboardRoutes from './dashboardRoutes';
+import utilityRoutes from './utilityRoutes';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 import { AuditLog, User } from '../models';
@@ -29,6 +30,7 @@ router.use('/games', gameRoutes);
 router.use('/bank-catalog', bankCatalogRoutes);
 router.use('/settings', settingRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/utility', utilityRoutes);
 
 router.get(
   '/audit-logs',
@@ -174,7 +176,6 @@ router.get(
 			operatorOptions
 		});
 	} catch (error) {
-		console.error('Failed to fetch audit logs:', error);
 		res.status(500).json({ message: 'Failed to fetch audit logs' });
 	}
   }
