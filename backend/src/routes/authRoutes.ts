@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { login, logout, getUs, getMySessions, revokeMySession, sessionEvents, lockDeviceFingerprint, unlockDeviceFingerprint, setup2FA, verify2FA } from '../controllers/AuthController';
+import { login, logout, getUs, getMySessions, revokeMySession, sessionEvents, lockDeviceFingerprint, unlockDeviceFingerprint } from '../controllers/AuthController';
 import { authenticateToken } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 
@@ -53,8 +53,6 @@ const loginLimiter = rateLimit({
 });
 
 router.post('/login', loginLimiter, login);
-router.post('/2fa/setup', setup2FA);
-router.post('/2fa/verify', verify2FA);
 router.post('/logout', logout);
 router.get('/get-us', authenticateToken, getUs);
 router.get(

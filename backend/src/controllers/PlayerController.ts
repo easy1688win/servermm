@@ -30,12 +30,6 @@ const resolveOperatorName = (op: any): string | null => {
   return rawUsername;
 };
 
-const extractPhoneNumber = (metadata: any): string | null => {
-  if (!metadata) return null;
-  const phoneNumber = metadata.phoneNumber || '';
-  return phoneNumber.trim() || null;
-};
-
 const extractBankKeys = (metadata: any): Set<string> => {
   const keys = new Set<string>();
   if (!metadata) return keys;
@@ -75,7 +69,7 @@ const validateMetadata = (metadata: any): string | null => {
       if (!bankName || !acc) continue;
       const key = bankName + '|' + acc;
       if (seen.has(key)) {
-        return 'P105';
+        return 'Player Banks: same brand cannot reuse the same account number.';
       }
       seen.add(key);
     }
@@ -89,34 +83,9 @@ const validateMetadata = (metadata: any): string | null => {
       if (!gameName || !id) continue;
       const key = gameName + '|' + id;
       if (seen.has(key)) {
-        return 'P106';
+        return 'Game Accounts: same game cannot reuse the same game id.';
       }
       seen.add(key);
-    }
-  }
-
-  return null;
-};
-
-const checkGlobalPhoneNumberConflict = async (
-  phoneNumber: string,
-  excludePlayerId?: number
-): Promise<string | null> => {
-  if (!phoneNumber) return null;
-
-  const players = await Player.findAll({
-    attributes: ['id', 'metadata'],
-  });
-
-  for (const p of players) {
-    const anyPlayer: any = p as any;
-    if (excludePlayerId && anyPlayer.id === excludePlayerId) continue;
-    const meta = anyPlayer.metadata;
-    if (!meta) continue;
-
-    const otherPhoneNumber = extractPhoneNumber(meta);
-    if (otherPhoneNumber && otherPhoneNumber === phoneNumber) {
-      return 'P110'; // Phone Number already exists
     }
   }
 
@@ -147,7 +116,7 @@ const checkGlobalMetadataConflicts = async (
       const otherBankKeys = extractBankKeys(meta);
       const conflict = bankKeyArr.some(k => otherBankKeys.has(k));
       if (conflict) {
-        return 'P102';
+        return 'Player Banks: this bank and account number is already linked to another player.';
       }
     }
 
@@ -155,7 +124,7 @@ const checkGlobalMetadataConflicts = async (
       const otherGameKeys = extractGameKeys(meta);
       const conflict = gameKeyArr.some(k => otherGameKeys.has(k));
       if (conflict) {
-        return 'P103';
+        return 'Game Accounts: this game and account id is already linked to another player.';
       }
     }
   }
@@ -165,14 +134,6 @@ const checkGlobalMetadataConflicts = async (
 
 const validateMetadataGlobalForCreate = async (metadata: any): Promise<string | null> => {
   if (!metadata) return null;
-  
-  // Check Phone Number uniqueness
-  const phoneNumber = extractPhoneNumber(metadata);
-  if (phoneNumber) {
-    const phoneConflict = await checkGlobalPhoneNumberConflict(phoneNumber);
-    if (phoneConflict) return phoneConflict;
-  }
-  
   const bankKeys = extractBankKeys(metadata);
   const gameKeys = extractGameKeys(metadata);
   return checkGlobalMetadataConflicts(bankKeys, gameKeys);
@@ -184,15 +145,6 @@ const validateMetadataGlobalForUpdate = async (
   playerId: number
 ): Promise<string | null> => {
   if (!newMetadata) return null;
-
-  // Check Phone Number uniqueness
-  const newPhoneNumber = extractPhoneNumber(newMetadata);
-  const oldPhoneNumber = extractPhoneNumber(oldMetadata || null);
-  
-  if (newPhoneNumber && newPhoneNumber !== oldPhoneNumber) {
-    const phoneConflict = await checkGlobalPhoneNumberConflict(newPhoneNumber, playerId);
-    if (phoneConflict) return phoneConflict;
-  }
 
   const newBankKeys = extractBankKeys(newMetadata);
   const newGameKeys = extractGameKeys(newMetadata);
@@ -874,7 +826,7 @@ export const createPlayer = async (req: AuthRequest, res: Response) => {
       } 
     });
     if (existingPlayer) {
-      return res.status(400).json({ message: 'P101' });
+      return res.status(400).json({ message: 'Player already exists in this game' });
     }
     const validationError = validateMetadata(metadata);
     if (validationError) {
@@ -924,12 +876,12 @@ export const updatePlayer = async (req: AuthRequest, res: Response) => {
     const playerId = Number(id);
 
     if (!Number.isInteger(playerId) || playerId <= 0) {
-      return res.status(400).json({ message: 'P107' });
+      return res.status(400).json({ message: 'Invalid player id' });
     }
 
     const player = await Player.findByPk(playerId);
     if (!player) {
-        return res.status(404).json({ message: 'P104' });
+        return res.status(404).json({ message: 'Player not found' });
     }
 
     const originalData = player.toJSON();
@@ -971,7 +923,7 @@ export const updatePlayer = async (req: AuthRequest, res: Response) => {
         res.json(responsePayload);
     } catch (error) {
         console.error('Error updating player:', error);
-        res.status(500).json({ message: 'P108' });
+        res.status(500).json({ message: 'Error updating player' });
     }
 };
 

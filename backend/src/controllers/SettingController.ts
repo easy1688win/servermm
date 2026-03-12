@@ -21,7 +21,8 @@ export const getAll = async (req: AuthRequest, res: Response): Promise<void> => 
     });
     res.json(result);
   } catch (error) {
-    res.status(500).json({ message: 'S101' });
+    console.error('Error fetching settings:', error);
+    res.status(500).json({ message: 'Error fetching settings' });
   }
 };
 
@@ -38,7 +39,8 @@ export const getByKey = async (req: AuthRequest, res: Response): Promise<void> =
 
     res.json(setting.value);
   } catch (error) {
-    res.status(500).json({ message: 'S102' });
+    console.error('Error fetching setting:', error);
+    res.status(500).json({ message: 'Error fetching setting' });
   }
 };
 
@@ -60,6 +62,7 @@ export const setByKey = async (req: AuthRequest, res: Response): Promise<void> =
 
     res.json(setting);
   } catch (error) {
-    res.status(500).json({ message: 'S103' });
+    console.error('Error saving setting:', error);
+    res.status(500).json({ message: 'Error saving setting' });
   }
 };

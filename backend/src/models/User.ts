@@ -1,8 +1,6 @@
 import { DataTypes, Model } from 'sequelize';
 import sequelize from '../config/database';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
-import Role from './Role';
-import Permission from './Permission';
 
 class User extends Model {
   public id!: number;
@@ -15,12 +13,6 @@ class User extends Model {
   public api_key!: string | null;
   public token_version!: number;
   public currency!: 'USD' | 'MYR';
-  public two_factor_secret!: string | null;
-  public two_factor_enabled!: boolean;
-
-  // Associations
-  public Roles?: Role[];
-  public Permissions?: Permission[];
 }
 
 User.init({
@@ -69,14 +61,6 @@ User.init({
     allowNull: false,
     defaultValue: 0,
   },
-  two_factor_secret: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
-  two_factor_enabled: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false,
-  },
 }, {
   sequelize,
   modelName: 'User',
@@ -92,9 +76,6 @@ User.init({
       if (instance.last_login_ip && !isEncrypted(instance.last_login_ip)) {
         instance.last_login_ip = encrypt(instance.last_login_ip);
       }
-      if (instance.two_factor_secret && !isEncrypted(instance.two_factor_secret)) {
-        instance.two_factor_secret = encrypt(instance.two_factor_secret);
-      }
     },
     beforeUpdate: (instance: User) => {
       if (instance.changed('api_key') && instance.api_key && !isEncrypted(instance.api_key)) {
@@ -105,9 +86,6 @@ User.init({
       }
       if (instance.changed('last_login_ip') && instance.last_login_ip && !isEncrypted(instance.last_login_ip)) {
         instance.last_login_ip = encrypt(instance.last_login_ip);
-      }
-      if (instance.changed('two_factor_secret') && instance.two_factor_secret && !isEncrypted(instance.two_factor_secret)) {
-        instance.two_factor_secret = encrypt(instance.two_factor_secret);
       }
     },
     afterFind: (instances: User | User[] | null) => {

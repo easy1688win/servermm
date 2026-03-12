@@ -36,7 +36,8 @@ export const getAllRoles = async (req: AuthRequest, res: Response): Promise<void
 
     res.json(formattedRoles);
   } catch (error) {
-    res.status(500).json({ message: 'R101' });
+    console.error('Error fetching roles:', error);
+    res.status(500).json({ message: 'Error fetching roles' });
   }
 };
 
@@ -81,7 +82,8 @@ export const getRolesContext = async (req: AuthRequest, res: Response): Promise<
       roles: formattedRoles,
     });
   } catch (error) {
-    res.status(500).json({ message: 'R102' });
+    console.error('Error fetching roles context:', error);
+    res.status(500).json({ message: 'Error fetching roles context' });
   }
 };
 
@@ -114,7 +116,8 @@ export const createRole = async (req: AuthRequest, res: Response): Promise<void>
 
     res.status(201).json(role);
   } catch (error) {
-    res.status(500).json({ message: 'R103' });
+    console.error('Error creating role:', error);
+    res.status(500).json({ message: 'Error creating role' });
   }
 };
 
@@ -155,7 +158,8 @@ export const updateRole = async (req: AuthRequest, res: Response): Promise<void>
 
     res.json(role);
   } catch (error) {
-    res.status(500).json({ message: 'R104' });
+    console.error('Error updating role:', error);
+    res.status(500).json({ message: 'Error updating role' });
   }
 };
 
@@ -182,6 +186,7 @@ export const deleteRole = async (req: AuthRequest, res: Response): Promise<void>
 
     res.json({ message: 'Role deleted' });
   } catch (error) {
-    res.status(500).json({ message: 'R105' });
+    console.error('Error deleting role:', error);
+    res.status(500).json({ message: 'Error deleting role' });
   }
 };

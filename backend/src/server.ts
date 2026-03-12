@@ -16,7 +16,7 @@ app.use(cors({
     'https://antmarkerting.pages.dev',
     'https://admin-1mo.pages.dev',
     'https://api.megainfinite88.com',
-    'https://v1.megainfinite88.com',
+    'https://v1.megainfinite88.com'
   ],
   credentials: true,
 }));

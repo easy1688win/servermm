@@ -10,9 +10,6 @@ import UserSession from '../models/UserSession';
 import UserDeviceLock from '../models/UserDeviceLock';
 import { AuthRequest } from '../middleware/auth';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
-import speakeasy from 'speakeasy';
-import QRCode from 'qrcode';
-import { setCache, getCache, invalidateCache } from '../services/CacheService';
 
 const secret = process.env.JWT_SECRET;
 if (!secret) {
@@ -65,217 +62,16 @@ const broadcastSessionRevoked = (userId: number, payload: SessionEventPayload) =
 const deriveDeviceNameFromUserAgent = (ua: string | null | undefined): string | null => {
   if (!ua) return null;
   let os = 'Unknown OS';
+  if (ua.includes('Windows')) os = 'Windows';
+  else if (ua.includes('Mac OS X')) os = 'macOS';
+  else if (ua.includes('Android')) os = 'Android';
+  else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+
   let browser = 'Browser';
-  
-  // More precise OS detection with version-specific patterns
-  const uaLower = ua.toLowerCase();
-  
-  // Windows detection with version
-  if (uaLower.includes('windows nt 10')) os = 'Windows 10/11';
-  else if (uaLower.includes('windows nt 6.3')) os = 'Windows 8.1';
-  else if (uaLower.includes('windows nt 6.2')) os = 'Windows 8';
-  else if (uaLower.includes('windows nt 6.1')) os = 'Windows 7';
-  else if (uaLower.includes('windows nt 6.0')) os = 'Windows Vista';
-  else if (uaLower.includes('windows nt 5.1')) os = 'Windows XP';
-  else if (uaLower.includes('windows nt 5.0')) os = 'Windows 2000';
-  else if (uaLower.includes('windows')) os = 'Windows';
-  
-  // macOS detection with version
-  else if (uaLower.includes('mac os x 10_15') || uaLower.includes('mac os x 10.15')) os = 'macOS Catalina';
-  else if (uaLower.includes('mac os x 10_14') || uaLower.includes('mac os x 10.14')) os = 'macOS Mojave';
-  else if (uaLower.includes('mac os x 10_13') || uaLower.includes('mac os x 10.13')) os = 'macOS High Sierra';
-  else if (uaLower.includes('mac os x 10_12') || uaLower.includes('mac os x 10.12')) os = 'macOS Sierra';
-  else if (uaLower.includes('mac os x 10_11') || uaLower.includes('mac os x 10.11')) os = 'macOS El Capitan';
-  else if (uaLower.includes('mac os x 10_10') || uaLower.includes('mac os x 10.10')) os = 'macOS Yosemite';
-  else if (uaLower.includes('mac os x')) os = 'macOS';
-  else if (uaLower.includes('macintosh')) os = 'macOS';
-  
-  // Linux distributions with better detection
-  else if (uaLower.includes('ubuntu')) {
-    if (uaLower.includes('ubuntu/20')) os = 'Ubuntu 20.04';
-    else if (uaLower.includes('ubuntu/18')) os = 'Ubuntu 18.04';
-    else if (uaLower.includes('ubuntu/22')) os = 'Ubuntu 22.04';
-    else if (uaLower.includes('ubuntu/16')) os = 'Ubuntu 16.04';
-    else os = 'Ubuntu';
-  }
-  else if (uaLower.includes('debian')) {
-    if (uaLower.includes('debian/10')) os = 'Debian 10';
-    else if (uaLower.includes('debian/11')) os = 'Debian 11';
-    else if (uaLower.includes('debian/9')) os = 'Debian 9';
-    else os = 'Debian';
-  }
-  else if (uaLower.includes('fedora')) {
-    if (uaLower.includes('fedora/36')) os = 'Fedora 36';
-    else if (uaLower.includes('fedora/35')) os = 'Fedora 35';
-    else if (uaLower.includes('fedora/34')) os = 'Fedora 34';
-    else os = 'Fedora';
-  }
-  else if (uaLower.includes('centos')) {
-    if (uaLower.includes('centos/7')) os = 'CentOS 7';
-    else if (uaLower.includes('centos/8')) os = 'CentOS 8';
-    else if (uaLower.includes('centos/6')) os = 'CentOS 6';
-    else os = 'CentOS';
-  }
-  else if (uaLower.includes('red hat')) os = 'Red Hat';
-  else if (uaLower.includes('arch linux')) os = 'Arch Linux';
-  else if (uaLower.includes('manjaro')) os = 'Manjaro';
-  else if (uaLower.includes('linux mint')) os = 'Linux Mint';
-  else if (uaLower.includes('opensuse')) os = 'openSUSE';
-  else if (uaLower.includes('elementary os')) os = 'Elementary OS';
-  else if (uaLower.includes('zorin os')) os = 'Zorin OS';
-  else if (uaLower.includes('deepin')) os = 'Deepin';
-  else if (uaLower.includes('pop!_os')) os = 'Pop!_OS';
-  else if (uaLower.includes('kali')) os = 'Kali Linux';
-  else if (uaLower.includes('parrot')) os = 'Parrot OS';
-  else if (uaLower.includes('linux')) os = 'Linux';
-  
-  // Mobile OS with better detection
-  else if (uaLower.includes('android')) {
-    if (uaLower.includes('android 13')) os = 'Android 13';
-    else if (uaLower.includes('android 12')) os = 'Android 12';
-    else if (uaLower.includes('android 11')) os = 'Android 11';
-    else if (uaLower.includes('android 10')) os = 'Android 10';
-    else if (uaLower.includes('android 9')) os = 'Android 9';
-    else if (uaLower.includes('android 8')) os = 'Android 8';
-    else if (uaLower.includes('android 7')) os = 'Android 7';
-    else if (uaLower.includes('android 6')) os = 'Android 6';
-    else os = 'Android';
-  }
-  else if (uaLower.includes('iphone') || uaLower.includes('ipod')) {
-    if (uaLower.includes('iphone os 16')) os = 'iOS 16';
-    else if (uaLower.includes('iphone os 15')) os = 'iOS 15';
-    else if (uaLower.includes('iphone os 14')) os = 'iOS 14';
-    else if (uaLower.includes('iphone os 13')) os = 'iOS 13';
-    else if (uaLower.includes('iphone os 12')) os = 'iOS 12';
-    else if (uaLower.includes('iphone os 11')) os = 'iOS 11';
-    else os = 'iOS';
-  }
-  else if (uaLower.includes('ipad')) {
-    if (uaLower.includes('cpu os 16')) os = 'iPadOS 16';
-    else if (uaLower.includes('cpu os 15')) os = 'iPadOS 15';
-    else if (uaLower.includes('cpu os 14')) os = 'iPadOS 14';
-    else if (uaLower.includes('cpu os 13')) os = 'iPadOS 13';
-    else os = 'iPadOS';
-  }
-  
-  // BSD systems
-  else if (uaLower.includes('freebsd')) os = 'FreeBSD';
-  else if (uaLower.includes('openbsd')) os = 'OpenBSD';
-  else if (uaLower.includes('netbsd')) os = 'NetBSD';
-  else if (uaLower.includes('dragonfly')) os = 'DragonFly BSD';
-  
-  // Other systems
-  else if (uaLower.includes('cros') || uaLower.includes('chrome os')) os = 'Chrome OS';
-  else if (uaLower.includes('windows phone')) os = 'Windows Phone';
-  else if (uaLower.includes('blackberry')) os = 'BlackBerry';
-  else if (uaLower.includes('webos')) os = 'webOS';
-  else if (uaLower.includes('symbian')) os = 'Symbian';
-  else if (uaLower.includes('nokia')) os = 'Nokia';
-  else if (uaLower.includes('samsung')) os = 'Samsung Bada';
-  else if (uaLower.includes('bada')) os = 'Bada';
-  
-  // More precise browser detection
-  // Chrome/Chromium-based browsers
-  if (uaLower.includes('edg/')) {
-    const edgeMatch = ua.match(/Edg\/(\d+\.\d+)/);
-    browser = edgeMatch ? `Edge ${edgeMatch[1]}` : 'Edge';
-  }
-  else if (uaLower.includes('chrome/') && !uaLower.includes('edg/')) {
-    const chromeMatch = ua.match(/Chrome\/(\d+\.\d+)/);
-    browser = chromeMatch ? `Chrome ${chromeMatch[1]}` : 'Chrome';
-  }
-  else if (uaLower.includes('chromium/')) {
-    const chromiumMatch = ua.match(/Chromium\/(\d+\.\d+)/);
-    browser = chromiumMatch ? `Chromium ${chromiumMatch[1]}` : 'Chromium';
-  }
-  
-  // Firefox-based browsers
-  else if (uaLower.includes('firefox/')) {
-    const firefoxMatch = ua.match(/Firefox\/(\d+\.\d+)/);
-    browser = firefoxMatch ? `Firefox ${firefoxMatch[1]}` : 'Firefox';
-  }
-  else if (uaLower.includes('waterfox/')) {
-    const waterfoxMatch = ua.match(/Waterfox\/(\d+\.\d+)/);
-    browser = waterfoxMatch ? `Waterfox ${waterfoxMatch[1]}` : 'Waterfox';
-  }
-  else if (uaLower.includes('pale moon/')) {
-    const paleMoonMatch = ua.match(/PaleMoon\/(\d+\.\d+)/);
-    browser = paleMoonMatch ? `Pale Moon ${paleMoonMatch[1]}` : 'Pale Moon';
-  }
-  
-  // Safari
-  else if (uaLower.includes('safari/') && !uaLower.includes('chrome')) {
-    const safariMatch = ua.match(/Version\/(\d+\.\d+)/);
-    browser = safariMatch ? `Safari ${safariMatch[1]}` : 'Safari';
-  }
-  
-  // Opera
-  else if (uaLower.includes('opr/') || uaLower.includes('opera/')) {
-    const operaMatch = ua.match(/(?:OPR|Opera)\/(\d+\.\d+)/);
-    browser = operaMatch ? `Opera ${operaMatch[1]}` : 'Opera';
-  }
-  
-  // Internet Explorer
-  else if (uaLower.includes('msie')) {
-    const ieMatch = ua.match(/MSIE (\d+\.\d+)/);
-    browser = ieMatch ? `Internet Explorer ${ieMatch[1]}` : 'Internet Explorer';
-  }
-  else if (uaLower.includes('trident/')) {
-    const tridentMatch = ua.match(/Trident\/(\d+\.\d+)/);
-    browser = tridentMatch ? `Internet Explorer ${tridentMatch[1]}` : 'Internet Explorer';
-  }
-  
-  // Other browsers with version detection
-  else if (uaLower.includes('vivaldi/')) {
-    const vivaldiMatch = ua.match(/Vivaldi\/(\d+\.\d+)/);
-    browser = vivaldiMatch ? `Vivaldi ${vivaldiMatch[1]}` : 'Vivaldi';
-  }
-  else if (uaLower.includes('brave/')) {
-    const braveMatch = ua.match(/Brave\/(\d+\.\d+)/);
-    browser = braveMatch ? `Brave ${braveMatch[1]}` : 'Brave';
-  }
-  else if (uaLower.includes('duckduckgo/')) {
-    const ddgMatch = ua.match(/DuckDuckGo\/(\d+\.\d+)/);
-    browser = ddgMatch ? `DuckDuckGo ${ddgMatch[1]}` : 'DuckDuckGo';
-  }
-  else if (uaLower.includes('tor browser')) {
-    browser = 'Tor Browser';
-  }
-  else if (uaLower.includes('maxthon/')) {
-    const maxthonMatch = ua.match(/Maxthon\/(\d+\.\d+)/);
-    browser = maxthonMatch ? `Maxthon ${maxthonMatch[1]}` : 'Maxthon';
-  }
-  else if (uaLower.includes('seamonkey/')) {
-    const seamonkeyMatch = ua.match(/SeaMonkey\/(\d+\.\d+)/);
-    browser = seamonkeyMatch ? `SeaMonkey ${seamonkeyMatch[1]}` : 'SeaMonkey';
-  }
-  else if (uaLower.includes('konqueror/')) {
-    const konquerorMatch = ua.match(/Konqueror\/(\d+\.\d+)/);
-    browser = konquerorMatch ? `Konqueror ${konquerorMatch[1]}` : 'Konqueror';
-  }
-  else if (uaLower.includes('epiphany/')) {
-    const epiphanyMatch = ua.match(/Epiphany\/(\d+\.\d+)/);
-    browser = epiphanyMatch ? `Epiphany ${epiphanyMatch[1]}` : 'Epiphany';
-  }
-  else if (uaLower.includes('midori/')) {
-    const midoriMatch = ua.match(/Midori\/(\d+\.\d+)/);
-    browser = midoriMatch ? `Midori ${midoriMatch[1]}` : 'Midori';
-  }
-  else if (uaLower.includes('qupzilla/')) {
-    const qupzillaMatch = ua.match(/QupZilla\/(\d+\.\d+)/);
-    browser = qupzillaMatch ? `QupZilla ${qupzillaMatch[1]}` : 'QupZilla';
-  }
-  else if (uaLower.includes('lynx')) {
-    const lynxMatch = ua.match(/Lynx\/(\d+\.\d+)/);
-    browser = lynxMatch ? `Lynx ${lynxMatch[1]}` : 'Lynx';
-  }
-  else if (uaLower.includes('w3m')) {
-    browser = 'w3m';
-  }
-  else if (uaLower.includes('links')) {
-    const linksMatch = ua.match(/Links\/(\d+\.\d+)/);
-    browser = linksMatch ? `Links ${linksMatch[1]}` : 'Links';
-  }
+  if (ua.includes('Edg/')) browser = 'Edge';
+  else if (ua.includes('Chrome/')) browser = 'Chrome';
+  else if (ua.includes('Firefox/')) browser = 'Firefox';
+  else if (ua.includes('Safari/')) browser = 'Safari';
 
   return `${os} ${browser}`;
 };
@@ -307,185 +103,6 @@ const getClientIp = (req: Request): string | null => {
 };
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
-
-const PRE_AUTH_SECRET = process.env.JWT_SECRET + '_PRE_AUTH';
-
-const finalizeLogin = async (user: any, req: Request, res: Response, deviceId: string, deviceName: string | undefined, clientIp: string | null) => {
-    const userAgent = req.headers['user-agent'] || null;
-    const jti = crypto.randomBytes(16).toString('hex');
-
-    const t = await sequelize.transaction();
-    let kickedSessions: { original: any; updated: any }[] = [];
-
-    try {
-      const activeSessions = await UserSession.findAll({
-        where: {
-          user_id: user.id,
-          is_active: true,
-        },
-        order: [['createdAt', 'ASC']],
-        transaction: t,
-        lock: t.LOCK.UPDATE as any,
-      });
-
-      // Revoke sessions with same device ID
-      for (const s of activeSessions.filter((s) => s.device_id === deviceId)) {
-        const original = s.toJSON();
-        s.is_active = false;
-        s.revoked_at = new Date();
-        s.revoked_reason = 'REPLACED_BY_NEW_LOGIN';
-        await s.save({ transaction: t });
-        kickedSessions.push({ original, updated: s.toJSON() });
-      }
-
-      const remaining = activeSessions.filter((s) => s.device_id !== deviceId);
-      const MAX_ALLOWED = MAX_DEVICES_PER_USER; 
-      
-      const uniqueDevices = new Map<string, typeof remaining>();
-      remaining.forEach(s => {
-        if (!uniqueDevices.has(s.device_id)) {
-           uniqueDevices.set(s.device_id, []);
-        }
-        uniqueDevices.get(s.device_id)?.push(s);
-      });
-      
-      const currentDeviceCount = uniqueDevices.size;
-      
-      if (currentDeviceCount >= MAX_ALLOWED) {
-         const devicesToKickCount = currentDeviceCount - MAX_ALLOWED + 1;
-         const sortedDevices = Array.from(uniqueDevices.entries()).sort(([, sessionsA], [, sessionsB]) => {
-            const sessionA = sessionsA[0];
-            const sessionB = sessionsB[0];
-            if (!sessionA || !sessionB) return 0;
-            const timeA = sessionA.createdAt instanceof Date ? sessionA.createdAt.getTime() : new Date(sessionA.createdAt).getTime();
-            const timeB = sessionB.createdAt instanceof Date ? sessionB.createdAt.getTime() : new Date(sessionB.createdAt).getTime();
-            return timeA - timeB; 
-         });
-         
-         const devicesToKick = sortedDevices.slice(0, devicesToKickCount);
-         for (const [_, sessions] of devicesToKick) {
-            for (const s of sessions) {
-                const original = s.toJSON();
-                s.is_active = false;
-                s.revoked_at = new Date();
-                s.revoked_reason = 'MAX_DEVICES_EXCEEDED';
-                await s.save({ transaction: t });
-                kickedSessions.push({ original, updated: s.toJSON() });
-            }
-         }
-      }
-
-      await UserSession.create(
-        {
-          user_id: user.id,
-          device_id: deviceId,
-          device_name:
-            typeof deviceName === 'string' && deviceName.trim().length > 0
-              ? deviceName.trim().slice(0, 191)
-              : null,
-          user_agent: userAgent ? userAgent.slice(0, 255) : null,
-          ip_address: clientIp,
-          jwt_id: jti,
-          is_active: true,
-          last_active_at: new Date(),
-          fullname: (user as any).full_name || user.username,
-        },
-        { transaction: t }
-      );
-
-      await t.commit();
-    } catch (err) {
-      await t.rollback();
-      throw err;
-    }
-
-    const token = jwt.sign(
-      {
-        id: user.id,
-        username: user.username,
-        jti,
-        deviceId: deviceId, 
-        tokenVersion: user.token_version, 
-      },
-      secret,
-      { expiresIn: (process.env.JWT_EXPIRES_IN || '8h') as any }
-    );
-
-    for (const entry of kickedSessions) {
-      await logAudit(
-        user.id,
-        'SESSION_FORCE_LOGOUT',
-        entry.original,
-        entry.updated,
-        clientIp || undefined
-      );
-      const updated: any = entry.updated;
-      const revokedAt =
-        updated.revoked_at instanceof Date
-          ? updated.revoked_at.toISOString()
-          : new Date().toISOString();
-      broadcastSessionRevoked(user.id, {
-        sessionId: updated.id,
-        deviceId: updated.device_id,
-        jwtId: updated.jwt_id || null,
-        reason: updated.revoked_reason || null,
-        revokedAt,
-      });
-    }
-
-    await logAudit(
-      user.id,
-      'LOGIN_SUCCESS',
-      null,
-      {
-        deviceId: deviceId,
-        jti,
-      },
-      clientIp || undefined
-    );
-
-    try {
-      const effectiveIp = clientIp || null;
-      await user.update({ last_login_at: new Date(), last_login_ip: effectiveIp });
-    } catch (e) {
-      console.error('Failed to update last login info:', e);
-    }
-
-    const encryptedToken = encrypt(token);
-
-    const parseDuration = (duration: string) => {
-      if (!duration) return 24 * 60 * 60 * 1000; 
-      const match = duration.match(/^(\d+)([dhms])?$/);
-      if (!match) return 24 * 60 * 60 * 1000;
-      const val = parseInt(match[1], 10);
-      const unit = match[2] || 'ms';
-      switch(unit) {
-        case 'd': return val * 24 * 60 * 60 * 1000;
-        case 'h': return val * 60 * 60 * 1000;
-        case 'm': return val * 60 * 1000;
-        case 's': return val * 1000;
-        default: return val;
-      }
-    };
-    const maxAge = parseDuration(process.env.JWT_EXPIRES_IN || '24h');
-
-    res.cookie('_T', encryptedToken, {
-      httpOnly: true,
-      secure: true, 
-      sameSite: 'none', 
-      maxAge: maxAge 
-    });
-
-    res.json({ 
-      success: true,
-      t: encryptedToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        name: user.full_name || user.username
-      }
-    });
-};
 
 const encodePermissionSlug = (slug: string): string => {
   let hash = 0;
@@ -648,168 +265,200 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const isSetupRequired = !user.two_factor_enabled;
-    const stage = isSetupRequired ? '2fa_setup' : '2fa_verify';
+    const uaHeader = req.headers['user-agent'];
+    const userAgent = typeof uaHeader === 'string' ? uaHeader : null;
 
-    const preAuthToken = jwt.sign(
+    const jti = crypto.randomBytes(16).toString('hex');
+
+    const t = await sequelize.transaction();
+    let kickedSessions: { original: any; updated: any }[] = [];
+
+    try {
+      const activeSessions = await UserSession.findAll({
+        where: {
+          user_id: user.id,
+          is_active: true,
+        },
+        order: [['createdAt', 'ASC']],
+        transaction: t,
+        lock: t.LOCK.UPDATE as any,
+      });
+
+      for (const s of activeSessions.filter((s) => s.device_id === effectiveDeviceId)) {
+        const original = s.toJSON();
+        s.is_active = false;
+        s.revoked_at = new Date();
+        s.revoked_reason = 'REPLACED_BY_NEW_LOGIN';
+        await s.save({ transaction: t });
+        kickedSessions.push({ original, updated: s.toJSON() });
+      }
+
+      const remaining = activeSessions.filter((s) => s.device_id !== effectiveDeviceId);
+
+      // Enforce Max Devices Policy (Kick Oldest)
+      // We want to allow MAX_DEVICES_PER_USER devices.
+      // If we are about to add 1 new device, we must ensure existing active devices <= MAX - 1.
+      
+      const MAX_ALLOWED = MAX_DEVICES_PER_USER; 
+      // Filter out sessions that are already marked for replacement (same device ID)
+      // 'remaining' contains sessions from OTHER devices that are currently active.
+      // We group them by device_id because one device might technically have multiple sessions if cleanup failed, 
+      // but ideally we treat unique device_id as unique device.
+      
+      const uniqueDevices = new Map<string, typeof remaining>();
+      remaining.forEach(s => {
+        if (!uniqueDevices.has(s.device_id)) {
+           uniqueDevices.set(s.device_id, []);
+        }
+        uniqueDevices.get(s.device_id)?.push(s);
+      });
+      
+      const currentDeviceCount = uniqueDevices.size;
+      
+      if (currentDeviceCount >= MAX_ALLOWED) {
+         // We need to kick (currentDeviceCount - MAX_ALLOWED + 1) devices to make room
+         const devicesToKickCount = currentDeviceCount - MAX_ALLOWED + 1;
+         
+         // Sort devices by their most recent activity or creation time to find the oldest
+         // We use the oldest session's createdAt as a proxy for "device added at"
+         const sortedDevices = Array.from(uniqueDevices.entries()).sort(([, sessionsA], [, sessionsB]) => {
+            // Safety check: ensure sessions arrays are not empty
+            const sessionA = sessionsA[0];
+            const sessionB = sessionsB[0];
+            
+            if (!sessionA || !sessionB) return 0;
+
+            const timeA = sessionA.createdAt instanceof Date ? sessionA.createdAt.getTime() : new Date(sessionA.createdAt).getTime();
+            const timeB = sessionB.createdAt instanceof Date ? sessionB.createdAt.getTime() : new Date(sessionB.createdAt).getTime();
+            return timeA - timeB; // Ascending: Oldest first
+         });
+         
+         const devicesToKick = sortedDevices.slice(0, devicesToKickCount);
+         
+         for (const [_, sessions] of devicesToKick) {
+            for (const s of sessions) {
+                const original = s.toJSON();
+                s.is_active = false;
+                s.revoked_at = new Date();
+                s.revoked_reason = 'MAX_DEVICES_EXCEEDED';
+                await s.save({ transaction: t });
+                kickedSessions.push({ original, updated: s.toJSON() });
+            }
+         }
+      }
+
+      await UserSession.create(
+        {
+          user_id: user.id,
+          device_id: effectiveDeviceId,
+          device_name:
+            typeof deviceName === 'string' && deviceName.trim().length > 0
+              ? deviceName.trim().slice(0, 191)
+              : null,
+          user_agent: userAgent ? userAgent.slice(0, 255) : null,
+          ip_address: clientIp,
+          jwt_id: jti,
+          is_active: true,
+          last_active_at: new Date(),
+          fullname: (user as any).full_name || user.username,
+        },
+        { transaction: t }
+      );
+
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    const token = jwt.sign(
       {
         id: user.id,
         username: user.username,
-        stage,
-        deviceId: effectiveDeviceId,
-        deviceName: typeof deviceName === 'string' && deviceName.trim().length > 0 ? deviceName.trim().slice(0, 191) : null
+        jti,
+        deviceId: effectiveDeviceId, // Bind Token to Device ID
+        tokenVersion: user.token_version, // Include current token version
       },
-      PRE_AUTH_SECRET,
-      { expiresIn: '10m' }
+      secret,
+      { expiresIn: (process.env.JWT_EXPIRES_IN || '8h') as any }
     );
 
-    res.json({
-      require2fa: true,
-      setupRequired: isSetupRequired,
-      token: preAuthToken
+    for (const entry of kickedSessions) {
+      await logAudit(
+        user.id,
+        'SESSION_FORCE_LOGOUT',
+        entry.original,
+        entry.updated,
+        clientIp || undefined
+      );
+      const updated: any = entry.updated;
+      const revokedAt =
+        updated.revoked_at instanceof Date
+          ? updated.revoked_at.toISOString()
+          : new Date().toISOString();
+      broadcastSessionRevoked(user.id, {
+        sessionId: updated.id,
+        deviceId: updated.device_id,
+        jwtId: updated.jwt_id || null,
+        reason: updated.revoked_reason || null,
+        revokedAt,
+      });
+    }
+
+    await logAudit(
+      user.id,
+      'LOGIN_SUCCESS',
+      null,
+      {
+        deviceId: effectiveDeviceId,
+        jti,
+      },
+      clientIp || undefined
+    );
+
+    // Update last login info
+    try {
+      const effectiveIp = clientIp || null;
+      await user.update({ last_login_at: new Date(), last_login_ip: effectiveIp });
+    } catch (e) {
+      console.error('Failed to update last login info:', e);
+    }
+
+    // Encrypt the token before setting it in the cookie
+    const encryptedToken = encrypt(token);
+
+    // Parse JWT_EXPIRES_IN to milliseconds for cookie maxAge
+    // Assuming format like '12h', '1d', '30m' or plain ms number
+    const parseDuration = (duration: string) => {
+      if (!duration) return 24 * 60 * 60 * 1000; // Default 1 day
+      const match = duration.match(/^(\d+)([dhms])?$/);
+      if (!match) return 24 * 60 * 60 * 1000;
+      const val = parseInt(match[1], 10);
+      const unit = match[2] || 'ms';
+      switch(unit) {
+        case 'd': return val * 24 * 60 * 60 * 1000;
+        case 'h': return val * 60 * 60 * 1000;
+        case 'm': return val * 60 * 1000;
+        case 's': return val * 1000;
+        default: return val;
+      }
+    };
+    const maxAge = parseDuration(process.env.JWT_EXPIRES_IN || '24h');
+
+    res.cookie('_T', encryptedToken, {
+      httpOnly: true,
+      secure: true, // Always secure for cross-site (even if dev, if we want to simulate prod behavior)
+      sameSite: 'none', // Required for cross-site cookie (frontend domain != backend domain)
+      maxAge: maxAge 
+    });
+
+    res.json({ 
+      success: true
     });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
-};
-
-export const setup2FA = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const { token } = req.body;
-        if (!token) {
-             res.status(400).json({ message: 'Token is required' });
-             return;
-        }
-
-        let decoded: any;
-        try {
-            decoded = jwt.verify(token, PRE_AUTH_SECRET);
-        } catch (e) {
-             res.status(401).json({ message: 'Invalid or expired token' });
-             return;
-        }
-
-        if (decoded.stage !== '2fa_setup') {
-             res.status(400).json({ message: 'Invalid stage for setup' });
-             return;
-        }
-
-        const user = await User.findByPk(decoded.id);
-        const displayName = user?.full_name || decoded.username || 'User';
-
-        const secret = speakeasy.generateSecret({ length: 20, name: `AIPlatform (${displayName})` });
-        
-        // Store secret in cache for verification step (10 mins)
-        setCache(`2fa_setup_secret:${decoded.id}`, secret.base32, 600);
-
-        const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url || '');
-
-        res.json({
-            secret: secret.base32,
-            qrCode: qrCodeUrl
-        });
-
-    } catch (error) {
-        console.error('Setup 2FA error:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-
-export const verify2FA = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const { token, code } = req.body;
-        const clientIp = getClientIp(req);
-
-        if (!token || !code) {
-             res.status(400).json({ message: 'Token and code are required' });
-             return;
-        }
-
-        let decoded: any;
-        try {
-            decoded = jwt.verify(token, PRE_AUTH_SECRET);
-        } catch (e) {
-             res.status(401).json({ message: 'Invalid or expired token' });
-             return;
-        }
-
-        const user: any = await User.findOne({ 
-          where: { id: decoded.id },
-          include: [
-            Permission,
-            {
-              model: Role,
-              include: [Permission]
-            }
-          ]
-        });
-
-        if (!user) {
-             res.status(404).json({ message: 'User not found' });
-             return;
-        }
-
-        if (decoded.stage === '2fa_setup') {
-             // Verify against cached secret
-             const cachedSecret = getCache(`2fa_setup_secret:${user.id}`);
-             if (!cachedSecret) {
-                 res.status(400).json({ message: 'Setup session expired. Please login again.' });
-                 return;
-             }
-
-             const verified = speakeasy.totp.verify({
-                 secret: cachedSecret as string,
-                 encoding: 'base32',
-                 token: code
-             });
-
-             if (!verified) {
-                await logAudit(user.id, 'TWOFA_VERIFY_FAILED', null, null, clientIp || undefined);
-                res.status(401).json({ message: 'Invalid code' });
-                return;
-             }
-
-             // Save to user
-             user.two_factor_secret = encrypt(cachedSecret as string);
-             user.two_factor_enabled = true;
-             await user.save();
-             
-             invalidateCache(`2fa_setup_secret:${user.id}`);
-             
-             await logAudit(user.id, 'TWOFA_SETUP', null, null, clientIp || undefined);
-
-        } else if (decoded.stage === '2fa_verify') {
-             if (!user.two_factor_enabled || !user.two_factor_secret) {
-                 // Should not happen if logic is correct, but safe fallback
-                 res.status(400).json({ message: '2FA not enabled for this user' });
-                 return;
-             }
-
-             const secret = decrypt(user.two_factor_secret);
-             const verified = speakeasy.totp.verify({
-                 secret,
-                 encoding: 'base32',
-                 token: code
-             });
-
-             if (!verified) {
-                 await logAudit(user.id, 'TWOFA_VERIFY_FAILED', null, null, clientIp || undefined);
-                 res.status(401).json({ message: 'Invalid code' });
-                 return;
-             }
-        } else {
-             res.status(400).json({ message: 'Invalid stage' });
-             return;
-        }
-
-        // Success - Finalize Login
-        await finalizeLogin(user, req, res, decoded.deviceId, decoded.deviceName, clientIp);
-
-    } catch (error) {
-        console.error('Verify 2FA error:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
@@ -877,165 +526,118 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
-
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
-
-    let targetUserId = userId;
-    
-    // If Super Admin, they can view all sessions (no user filter)
-    if (isSuperAdmin) {
-      targetUserId = undefined; // Will not filter by user_id
-    }
-
-    // We want to return user+device combinations, not aggregated by device
-    // 1. Find all active sessions for this user (or all users if Super Admin)
-    const sessionWhere = targetUserId ? { user_id: targetUserId, is_active: true } : { is_active: true };
+    // We also want to include any "Locked" devices even if they are not active, 
+    // so the admin can see them and unlock them if needed.
+    // 1. Find all active sessions for this user
     const activeSessions = await UserSession.findAll({
-      where: sessionWhere,
+      where: { 
+        user_id: userId,
+        is_active: true 
+      },
       order: [['createdAt', 'DESC']],
     });
 
-    // 2. Find all locks for this user (or all users if Super Admin)
-    const lockWhere = targetUserId ? { user_id: targetUserId } : {};
+    // 2. Find all locks for this user
     const userLocks = await UserDeviceLock.findAll({
-      where: lockWhere
+      where: { user_id: userId }
     });
 
-    // 3. Collect user+device combinations from both active sessions and locks
-    const userDeviceSet = new Set<string>();
+    // 3. Collect device IDs from both active sessions and locks
+    const deviceIdSet = new Set<string>();
     for (const s of activeSessions) {
-      userDeviceSet.add(`${s.user_id}:${s.device_id}`);
+      deviceIdSet.add(s.device_id);
     }
     for (const l of userLocks) {
-      userDeviceSet.add(`${l.user_id}:${l.device_id}`);
+      deviceIdSet.add(l.device_id);
     }
 
-    if (userDeviceSet.size === 0) {
+    if (deviceIdSet.size === 0) {
       res.json([]);
       return;
     }
 
-    // 4. Get user information for all users involved
-    const userIds = new Set<number>();
-    const deviceIds = new Set<string>();
-    
-    for (const userDeviceKey of userDeviceSet) {
-      const [uid, deviceId] = userDeviceKey.split(':');
-      userIds.add(Number(uid));
-      deviceIds.add(deviceId);
-    }
+    const deviceIds = Array.from(deviceIdSet.values());
 
-    const users = await User.findAll({
-      where: { id: { [Op.in]: Array.from(userIds) } },
-      attributes: ['id', 'username', 'full_name']
-    });
-
-    const userMap = new Map<number, typeof users[number]>();
-    for (const u of users) {
-      userMap.set(u.id, u);
-    }
-
-    // 5. Get the latest session info for each user+device combination
+    // 4. Re-query sessions for these devices to get display info (name, ip, etc)
+    // We prioritize active sessions, but if a device is only locked (not active), we need its last session info.
     const allRelevantSessions = await UserSession.findAll({
       where: {
-        [Op.or]: [
-          { device_id: { [Op.in]: Array.from(deviceIds) } }
-        ]
+        device_id: { [Op.in]: deviceIds },
+        // We fetch both active and inactive to find the latest info for locked devices
       },
       order: [['createdAt', 'DESC']],
     });
 
-    // Map to find the best session for each user+device combination
-    const userDeviceBestSession = new Map<string, typeof allRelevantSessions[number]>();
+    // Map to find the "best" session to represent each device for this user
+    // Priority: Active session for this user > Inactive session for this user > Any session
+    const deviceBestSession = new Map<string, typeof allRelevantSessions[number]>();
     
     for (const s of allRelevantSessions) {
-      const key = `${s.user_id}:${s.device_id}`;
-      if (!userDeviceBestSession.has(key)) {
-        userDeviceBestSession.set(key, s);
-      } else {
-        const currentBest = userDeviceBestSession.get(key)!;
-        // Prefer active sessions
-        if (!currentBest.is_active && s.is_active) {
-          userDeviceBestSession.set(key, s);
-        }
-        // If both have same active state, prefer more recent
-        else if (currentBest.is_active === s.is_active) {
-          const currentTime = currentBest.createdAt instanceof Date ? currentBest.createdAt.getTime() : new Date(currentBest.createdAt).getTime();
-          const newTime = s.createdAt instanceof Date ? s.createdAt.getTime() : new Date(s.createdAt).getTime();
-          if (newTime > currentTime) {
-            userDeviceBestSession.set(key, s);
+       if (!deviceBestSession.has(s.device_id)) {
+          deviceBestSession.set(s.device_id, s);
+       } else {
+          const currentBest = deviceBestSession.get(s.device_id)!;
+          // If current best is not active but this one is, swap
+          if (!currentBest.is_active && s.is_active) {
+             deviceBestSession.set(s.device_id, s);
           }
-        }
-      }
+          // If both match active state, prefer the one belonging to current user
+          else if (currentBest.is_active === s.is_active && currentBest.user_id !== userId && s.user_id === userId) {
+             deviceBestSession.set(s.device_id, s);
+          }
+       }
     }
 
-    // 6. Get all locks for these user+device combinations
+    // 5. Get all locks for these devices (global or user specific check)
     const locks = await UserDeviceLock.findAll({
       where: {
-        [Op.and]: [
-          { user_id: { [Op.in]: Array.from(userIds) } },
-          { device_id: { [Op.in]: Array.from(deviceIds) } }
-        ]
+        device_id: { [Op.in]: deviceIds },
       },
     });
-
-    const lockedUserDevices = new Set<string>();
+    const lockedByUserDevice = new Set<string>();
     for (const lock of locks) {
-      lockedUserDevices.add(`${lock.user_id}:${lock.device_id}`);
+      lockedByUserDevice.add(`${lock.user_id}:${lock.device_id}`);
     }
 
-    // 7. Build Result - each record represents a user on a device
+    // 6. Build Result
     const result = [];
-    for (const userDeviceKey of userDeviceSet) {
-      const [uid, deviceId] = userDeviceKey.split(':');
-      const userId = Number(uid);
-      const session = userDeviceBestSession.get(userDeviceKey);
-      
-      const userInfo = userMap.get(userId);
-      if (!userInfo) continue; // Skip if user not found
+    for (const deviceId of deviceIds) {
+       const s = deviceBestSession.get(deviceId);
+       if (!s) continue; // Should not happen
 
-      const isLocked = lockedUserDevices.has(userDeviceKey);
-      const isActive = session?.is_active || false;
+       // Check if this device should be shown:
+       // Show if: It has an active session OR it is locked by this user
+       const isLocked = lockedByUserDevice.has(`${userId}:${deviceId}`);
+       const isActive = s.is_active;
 
-      // Only show if active or locked (or both)
-      if (!isActive && !isLocked) {
-        continue;
-      }
+       if (!isActive && !isLocked) {
+          continue; // Skip terminated devices that are NOT locked
+       }
 
-      result.push({
-        id: session?.id || 0, // Use 0 for lock-only records, frontend will handle
-        user_id: userId,
-        username: userInfo.username,
-        device_id: deviceId,
-        device_name: session ? deriveDeviceNameFromUserAgent(session.user_agent) : 'Unknown Device',
-        user_agent: session?.user_agent || null,
-        ip_address: session?.ip_address || null,
-        is_active: isActive,
-        is_locked: isLocked,
-        locked_by_self: isLocked && userId === req.user?.id,
-        revoked_at: session?.revoked_at || null,
-        revoked_reason: session?.revoked_reason || null,
-        createdAt: session?.createdAt || new Date().toISOString(),
-        updatedAt: session?.updatedAt || new Date().toISOString(),
-        last_active_at: session?.last_active_at || null,
-        fullname: userInfo.full_name || userInfo.username,
-        is_self: userId === req.user?.id,
+       const lockKey = `${userId}:${deviceId}`;
+       
+       result.push({
+        id: s.id,
+        device_id: s.device_id,
+        device_name: s.device_name || deriveDeviceNameFromUserAgent(s.user_agent),
+        user_agent: s.user_agent,
+        ip_address: s.ip_address,
+        is_active: isActive, // Might be false if it's only shown because it's locked
+        revoked_at: s.revoked_at,
+        revoked_reason: s.revoked_reason,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        last_active_at: s.last_active_at,
+        fullname: (s as any).fullname,
+        // other_accounts: [], // Simplified for now, or fetch if needed
+        is_self: s.user_id === userId,
+        is_device_locked: isLocked,
+        is_device_locked_for_self: isLocked,
       });
     }
 
-    // Sort: Active first, then by creation date (newest first)
     result.sort((a, b) => {
+      // Active first, then Locked
       if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
       return (new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     });
@@ -1072,22 +674,7 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
       return;
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
-
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
-
-    // Check if user has access to this device (owns a session with same device_id) or is Super Admin
-    const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
+    const hasAccessDevice = await UserSession.findOne({
       where: {
         user_id: userId,
         device_id: session.device_id,
@@ -1146,54 +733,26 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
     }
     const { id } = req.params;
     const sessionId = Number(id);
-    
-    // Handle both old session ID format and new user+device format
-    let targetUserId: number;
-    let deviceId: string;
-    
-    if (sessionId && sessionId > 0) {
-      // Legacy format: find session by ID
-      const session = await UserSession.findOne({
-        where: { id: sessionId },
-      });
-
-      if (!session) {
-        res.status(404).json({ message: 'Session not found' });
-        return;
-      }
-
-      targetUserId = session.user_id;
-      deviceId = session.device_id;
-    } else {
-      // New format: expect user_id and device_id in request body
-      const { user_id: bodyUserId, device_id: bodyDeviceId } = req.body;
-      if (!bodyUserId || !bodyDeviceId) {
-        res.status(400).json({ message: 'user_id and device_id are required' });
-        return;
-      }
-      targetUserId = Number(bodyUserId);
-      deviceId = String(bodyDeviceId);
+    if (!sessionId || Number.isNaN(sessionId)) {
+      res.status(400).json({ message: 'Invalid session id' });
+      return;
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
+    const session = await UserSession.findOne({
+      where: {
+        id: sessionId,
+      },
     });
 
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    if (!session) {
+      res.status(404).json({ message: 'Session not found' });
+      return;
+    }
 
-    // Check if user has access to this device (owns a session with same device_id) or is Super Admin
-    const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
+    const hasAccessDevice = await UserSession.findOne({
       where: {
         user_id: userId,
-        device_id: deviceId,
+        device_id: session.device_id,
       },
     });
 
@@ -1204,8 +763,8 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
 
     const existingLock = await UserDeviceLock.findOne({
       where: {
-        user_id: targetUserId,
-        device_id: deviceId,
+        user_id: session.user_id,
+        device_id: session.device_id,
       },
     });
 
@@ -1220,8 +779,8 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
     try {
       await UserDeviceLock.create(
         {
-          user_id: targetUserId,
-          device_id: deviceId,
+          user_id: session.user_id,
+          device_id: session.device_id,
           locked_by: userId,
           reason: null,
         },
@@ -1230,8 +789,8 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
 
       const activeSessions = await UserSession.findAll({
         where: {
-          user_id: targetUserId,
-          device_id: deviceId,
+          user_id: session.user_id,
+          device_id: session.device_id,
           is_active: true,
         },
         transaction: t,
@@ -1259,8 +818,8 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
       userId,
       'DEVICE_FINGERPRINT_LOCKED',
       {
-        targetUserId: targetUserId,
-        deviceId: deviceId,
+        targetUserId: session.user_id,
+        deviceId: session.device_id,
       },
       null,
       clientIp || undefined
@@ -1297,54 +856,26 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
     }
     const { id } = req.params;
     const sessionId = Number(id);
-    
-    // Handle both old session ID format and new user+device format
-    let targetUserId: number;
-    let deviceId: string;
-    
-    if (sessionId && sessionId > 0) {
-      // Legacy format: find session by ID
-      const session = await UserSession.findOne({
-        where: { id: sessionId },
-      });
-
-      if (!session) {
-        res.status(404).json({ message: 'Session not found' });
-        return;
-      }
-
-      targetUserId = session.user_id;
-      deviceId = session.device_id;
-    } else {
-      // New format: expect user_id and device_id in request body
-      const { user_id: bodyUserId, device_id: bodyDeviceId } = req.body;
-      if (!bodyUserId || !bodyDeviceId) {
-        res.status(400).json({ message: 'user_id and device_id are required' });
-        return;
-      }
-      targetUserId = Number(bodyUserId);
-      deviceId = String(bodyDeviceId);
+    if (!sessionId || Number.isNaN(sessionId)) {
+      res.status(400).json({ message: 'Invalid session id' });
+      return;
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
+    const session = await UserSession.findOne({
+      where: {
+        id: sessionId,
+      },
     });
 
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    if (!session) {
+      res.status(404).json({ message: 'Session not found' });
+      return;
+    }
 
-    // Check if user has access to this device (owns a session with same device_id) or is Super Admin
-    const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
+    const hasAccessDevice = await UserSession.findOne({
       where: {
         user_id: userId,
-        device_id: deviceId,
+        device_id: session.device_id,
       },
     });
 
@@ -1355,8 +886,8 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
 
     const deletedCount = await UserDeviceLock.destroy({
       where: {
-        user_id: targetUserId,
-        device_id: deviceId,
+        user_id: session.user_id,
+        device_id: session.device_id,
       },
     });
 
@@ -1366,8 +897,8 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
       userId,
       'DEVICE_FINGERPRINT_UNLOCKED',
       {
-        targetUserId: targetUserId,
-        deviceId: deviceId,
+        targetUserId: session.user_id,
+        deviceId: session.device_id,
         deletedCount,
       },
       null,

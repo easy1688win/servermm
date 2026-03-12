@@ -83,7 +83,6 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
     if (!canViewProfit) {
       json.amount = null;
       json.bonus = null;
-      // walve字段不受权限检查限制，因为Recent Transactions需要显示
     }
 
     json.bonus = bonus;
@@ -91,9 +90,6 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
     json.ip = ip;
     json.game_name = gameName;
     json.game_account_id = gameAccountId;
-    
-    // 确保walve字段被包含
-    json.walve = json.walve ?? 0;
 
     return json;
   });
@@ -128,7 +124,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
 
     res.json(shaped);
   } catch (error) {
-    res.status(500).json({ message: 'T891' });
+    res.status(500).json({ message: 'Error fetching transactions' });
   }
 };
 
@@ -189,7 +185,7 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
 
     res.json(payload);
   } catch (error) {
-    res.status(500).json({ message: 'T892' });
+    res.status(500).json({ message: 'Error fetching player transaction history' });
   }
 };
 
@@ -744,7 +740,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
       ],
         order: [['created_at', 'DESC']],
-        limit: 5,
+        limit: 100,
       }),
       BankAccount.findAll(),
       Game.findAll({
@@ -848,8 +844,6 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
             createdAt: t.createdAt ?? t.created_at ?? null,
             status: t.status ?? null,
             player_game_id: t.Player?.player_game_id ?? t.player_game_id ?? null,
-            amount: t.amount ?? null,
-            walve: t.walve ?? null,
           }));
 
     const payloadBankAccounts =
@@ -874,7 +868,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       games: payloadGames,
     });
   } catch (error) {
-    res.status(500).json({ message: 'T893' });
+    res.status(500).json({ message: 'Error fetching transaction context' });
   }
 };
 
@@ -948,7 +942,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       if (type === 'DEPOSIT') {
         const requiredFromGame = transactionAmount + transactionWalve;
         if (beforeGameBalance < requiredFromGame) {
-          throw new Error('T894');
+          throw new Error('Insufficient game balance for deposit');
         }
         game.balance = beforeGameBalance - requiredFromGame;
       } else if (type === 'WITHDRAWAL') {
@@ -1096,7 +1090,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         await t.rollback();
     }
     console.error('Transaction Error:', error);
-    res.status(500).json({ message: 'T894' });
+    res.status(500).json({ message: error.message || 'Error processing transaction' });
   }
 };
 
@@ -1154,7 +1148,7 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
       await t.rollback();
     }
     console.error('Transaction Edit Error:', error);
-    return res.status(500).json({ message: 'T895' });
+    return res.status(500).json({ message: error.message || 'Error editing transaction' });
   }
 };
 
@@ -1347,6 +1341,6 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
     } catch (error: any) {
         if (!(t as any).finished) await t.rollback();
         console.error('Void Transaction Error:', error);
-        res.status(500).json({ message: 'T896' });
+        res.status(500).json({ message: error.message || 'Error voiding transaction' });
     }
 };
