@@ -1,6 +1,6 @@
 import { DataTypes, Model } from 'sequelize';
 import sequelize from '../config/database';
-import { generateTransactionId } from '../utils/idGenerator';
+import { generateTransactionId } from '../utils/snowflake';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
 
 class Transaction extends Model {
@@ -24,7 +24,7 @@ class Transaction extends Model {
 
 Transaction.init({
   id: {
-    type: DataTypes.STRING(32),
+    type: DataTypes.STRING(20), // Increased to accommodate 64-bit Snowflake IDs
     primaryKey: true,
   },
   player_id: {
