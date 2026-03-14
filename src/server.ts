@@ -12,13 +12,16 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://antmarkerting.pages.dev',
-    'https://admin-1mo.pages.dev',
-    'https://api.megainfinite88.com',
-    'https://v1.megainfinite88.com',
-  ],
+  origin: (origin, callback) => {
+    // 允许所有子域名 + 特定域名
+    const isAllowed = !origin || 
+                      origin.includes('.megainfinite88.com') ||
+                      origin === 'https://antmarkerting.pages.dev' ||
+                      origin === 'https://admin-1mo.pages.dev' ||
+                      origin === 'http://localhost:5173';
+    
+    callback(null, isAllowed);
+  },
   credentials: true,
 }));
 app.use(cookieParser());
