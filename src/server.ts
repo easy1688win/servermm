@@ -11,18 +11,55 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://antmarkerting.pages.dev',
-    'https://admin-1mo.pages.dev',
-    'https://api.megainfinite88.com',
-    'https://v1.megainfinite88.com',
-    'https://t4m.megainfinite88.com',
-    'https://db-test.megainfinite88.com',
-  ],
+const rawCorsOrigins = (process.env.CORS_ORIGINS || '').trim();
+const extraAllowedOrigins = rawCorsOrigins
+  ? rawCorsOrigins
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : [];
+
+const staticAllowedOrigins = new Set<string>([
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://antmarkerting.pages.dev',
+  'https://admin-1mo.pages.dev',
+  ...extraAllowedOrigins,
+]);
+
+const isAllowedOrigin = (origin: string) => {
+  if (staticAllowedOrigins.has(origin)) {
+    return true;
+  }
+
+  try {
+    const url = new URL(origin);
+    const host = url.hostname.toLowerCase();
+    if (host === 'megainfinite88.com' || host.endsWith('.megainfinite88.com')) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+};
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      return callback(null, true);
+    }
+    return callback(null, isAllowedOrigin(origin));
+  },
   credentials: true,
-}));
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  maxAge: 86400,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(cookieParser());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
