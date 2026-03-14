@@ -4,12 +4,58 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
 
 const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT } = process.env;
+
+type InitAdminCredentialRecord = {
+  createdAt: string;
+  username: string;
+  fullName: string;
+  password?: string;
+  apiKeyGenerated?: boolean;
+  status: 'created' | 'already_exists';
+};
+
+const persistInitAdminCredentials = (record: InitAdminCredentialRecord) => {
+  const baseDir = (process.env.INIT_ADMIN_CREDENTIALS_DIR || '').trim();
+  const outDir = baseDir.length > 0 ? baseDir : path.join(process.cwd(), '.secure');
+  const outFile = path.join(outDir, 'init_admin_credentials.json');
+
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+  } catch {
+  }
+
+  let existing: any = [];
+  try {
+    if (fs.existsSync(outFile)) {
+      const raw = fs.readFileSync(outFile, 'utf8');
+      existing = JSON.parse(raw);
+    }
+  } catch {
+    existing = [];
+  }
+
+  const next = Array.isArray(existing) ? [...existing, record] : [existing, record];
+
+  try {
+    fs.writeFileSync(outFile, JSON.stringify(next, null, 2), { encoding: 'utf8' });
+    try {
+      fs.chmodSync(outFile, 0o600);
+    } catch {
+    }
+    console.log(`Init admin credentials saved to: ${outFile}`);
+  } catch (e) {
+    console.log('Failed to persist init admin credentials file.');
+    console.log(e);
+  }
+};
 
 const PERMISSIONS = [
   // --- Routes ---
@@ -200,11 +246,21 @@ async function initDb() {
 
     if (created) {
       console.log('Admin user created.');
-      console.log(`Username: ${adminUsername}`);
-      console.log(`Password: ${adminPassword}`);
-      console.log('Store these credentials securely. You will not be able to retrieve the password from the database.');
+      persistInitAdminCredentials({
+        createdAt: new Date().toISOString(),
+        username: adminUsername,
+        fullName: adminFullName,
+        password: adminPassword,
+        status: 'created',
+      });
     } else {
       console.log('Admin user already exists.');
+      persistInitAdminCredentials({
+        createdAt: new Date().toISOString(),
+        username: adminUsername,
+        fullName: adminFullName,
+        status: 'already_exists',
+      });
     }
 
     if (!admin.full_name && adminFullName) {
@@ -264,7 +320,6 @@ async function initDb() {
       }
     });
     
-    console.log('Player metadata settings seeded.');
 
     process.exit(0);
   } catch (error) {
