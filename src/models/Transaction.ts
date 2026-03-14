@@ -24,7 +24,7 @@ class Transaction extends Model {
 
 Transaction.init({
   id: {
-    type: DataTypes.STRING(20), // Increased to accommodate 64-bit Snowflake IDs
+    type: DataTypes.STRING(25), // Increased to accommodate 64-bit Snowflake IDs
     primaryKey: true,
   },
   player_id: {
