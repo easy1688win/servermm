@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "db:fix": "ts-node src/scripts/checkDb.ts",
     "db:install": "ts-node src/scripts/initDb.ts",
+    "migrate": "npx sequelize-cli db:migrate",
     "test": "jest"
   },
   "keywords": [],
