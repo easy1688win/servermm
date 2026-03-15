@@ -2,9 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
+import path from 'path';
 import routes from './routes';
 import sequelize from './config/database';
 import { checkMaintenanceMode } from './middleware/maintenance';
+import { trackLandingEventGif, trackLandingPageViewGif } from './controllers/LandingTrackingController';
 
 dotenv.config();
 
@@ -63,11 +65,14 @@ app.options(/.*/, cors(corsOptions));
 app.use(cookieParser());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
 // Trust proxy for rate limiting behind proxies (like Nginx, Cloudflare, or local dev proxy)
 app.set('trust proxy', 1);
 
 app.use(checkMaintenanceMode);
+app.get('/lp/pv.gif', trackLandingPageViewGif);
+app.get('/lp/event.gif', trackLandingEventGif);
 app.use('/api', routes);
 
 app.get('/', (req, res) => {

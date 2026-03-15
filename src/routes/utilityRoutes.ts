@@ -1,8 +1,34 @@
 import { Router } from 'express';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import multer from 'multer';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 
 const router = Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+const getPublicBaseUrl = (req: any): string => {
+  const raw = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (raw) return raw;
+  const proto = req.protocol || 'http';
+  const host = req.get ? req.get('host') : '';
+  return `${proto}://${host}`.replace(/\/+$/, '');
+};
+
+const getImageExt = (mimetype: string): string | null => {
+  const mt = (mimetype || '').toLowerCase();
+  if (mt === 'image/jpeg' || mt === 'image/jpg') return '.jpg';
+  if (mt === 'image/png') return '.png';
+  if (mt === 'image/webp') return '.webp';
+  if (mt === 'image/gif') return '.gif';
+  return null;
+};
 
 // IP Geolocation endpoint
 router.post('/geolocation', 
@@ -106,6 +132,43 @@ router.post('/geolocation',
       res.json(finalResults);
     } catch (error) {
       res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+);
+
+router.post(
+  '/upload-image',
+  authenticateToken,
+  requirePermission('action:marketing_manage'),
+  upload.single('file'),
+  async (req: AuthRequest, res) => {
+    try {
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) {
+        res.status(400).json({ message: 'No file uploaded' });
+        return;
+      }
+
+      const ext = getImageExt(file.mimetype);
+      if (!ext) {
+        res.status(400).json({ message: 'Unsupported image type' });
+        return;
+      }
+
+      const now = new Date();
+      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const dir = path.resolve(process.cwd(), 'uploads', 'landing-images', ym);
+      fs.mkdirSync(dir, { recursive: true });
+
+      const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+      const fullPath = path.join(dir, filename);
+      fs.writeFileSync(fullPath, file.buffer);
+
+      const base = getPublicBaseUrl(req);
+      const url = `${base}/uploads/landing-images/${ym}/${filename}`;
+      res.json({ url });
+    } catch {
+      res.status(500).json({ message: 'Upload failed' });
     }
   }
 );

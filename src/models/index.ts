@@ -15,6 +15,9 @@ import Setting from './Setting';
 import PlayerStats from './PlayerStats';
 import UserSession from './UserSession';
 import UserDeviceLock from './UserDeviceLock';
+import LandingPage from './LandingPage';
+import LandingPageVisit from './LandingPageVisit';
+import LandingPageEvent from './LandingPageEvent';
 
 // User - Permission (Direct Many-to-Many - Deprecated but kept for compatibility if needed)
 User.belongsToMany(Permission, { through: UserPermission, foreignKey: 'userId', otherKey: 'permissionId' });
@@ -60,6 +63,11 @@ User.hasMany(UserDeviceLock, { foreignKey: 'user_id', as: 'deviceLocks' });
 UserDeviceLock.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 UserDeviceLock.belongsTo(User, { foreignKey: 'locked_by', as: 'lockedBy' });
 
+// LandingPage - User (Many-to-One)
+LandingPage.belongsTo(User, { foreignKey: 'operator_id', as: 'operator', onDelete: 'SET NULL' });
+LandingPageVisit.belongsTo(LandingPage, { foreignKey: 'landing_page_id', onDelete: 'CASCADE' });
+LandingPageEvent.belongsTo(LandingPage, { foreignKey: 'landing_page_id', onDelete: 'CASCADE' });
+
 export {
   User,
   Permission,
@@ -78,4 +86,7 @@ export {
   PlayerStats,
   UserSession,
   UserDeviceLock,
+  LandingPage,
+  LandingPageVisit,
+  LandingPageEvent,
 };

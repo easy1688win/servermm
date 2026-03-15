@@ -69,6 +69,7 @@ const PERMISSIONS = [
   { slug: 'route:reports', description: 'Access Reports' },
   { slug: 'route:users', description: 'Access User Management' },
   { slug: 'route:settings', description: 'Access Settings' },
+  { slug: 'route:marketing', description: 'Access Marketing' },
 
   // --- Views ---
   { slug: 'view:bank_balance', description: 'View Bank Balances' },
@@ -109,7 +110,8 @@ const PERMISSIONS = [
   { slug: 'action:settings_manage', description: 'Manage Settings' },
   { slug: 'action:device_session_revoke', description: 'Revoke device sessions for own account' },
   { slug: 'action:device_fingerprint_lock', description: 'Lock device fingerprint for an account' },
-  { slug: 'action:security_manage', description: 'Manage Security Settings (2FA, etc.)' }
+  { slug: 'action:security_manage', description: 'Manage Security Settings (2FA, etc.)' },
+  { slug: 'action:marketing_manage', description: 'Manage Marketing Landing Pages' },
 ];
 
 const ROLES = [

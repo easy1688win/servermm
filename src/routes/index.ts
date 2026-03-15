@@ -12,6 +12,7 @@ import bankCatalogRoutes from './bankCatalogRoutes';
 import settingRoutes from './settingRoutes';
 import dashboardRoutes from './dashboardRoutes';
 import utilityRoutes from './utilityRoutes';
+import landingPageRoutes from './landingPageRoutes';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 import { getMaintenanceStatus } from '../middleware/maintenance';
@@ -32,6 +33,7 @@ router.use('/bank-catalog', bankCatalogRoutes);
 router.use('/settings', settingRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/utility', utilityRoutes);
+router.use('/landing-pages', landingPageRoutes);
 
 router.get('/maintenance', getMaintenanceStatus);
 
