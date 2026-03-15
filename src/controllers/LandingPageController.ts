@@ -143,6 +143,45 @@ const resolveOperatorName = (op: any): string | null => {
   return rawUsername;
 };
 
+const normalizeSource = (value: any): string => {
+  const s = typeof value === 'string' ? value.trim() : '';
+  return s;
+};
+
+const parseSourceOptions = (raw: any): string[] => {
+  const fromArray = (arr: any[]): string[] => arr.map(normalizeSource).filter(Boolean);
+
+  if (Array.isArray(raw)) return fromArray(raw);
+
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return fromArray(parsed);
+      if (typeof parsed === 'string') return fromArray([parsed]);
+    } catch {
+    }
+    return trimmed
+      .split(/[\n,;]+/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  if (raw && typeof raw === 'object') {
+    const maybeOptions = (raw as any).options;
+    if (Array.isArray(maybeOptions)) return fromArray(maybeOptions);
+    const allValues = Object.values(raw);
+    const flattened: any[] = [];
+    for (const v of allValues) {
+      if (Array.isArray(v)) flattened.push(...v);
+    }
+    if (flattened.length > 0) return fromArray(flattened);
+  }
+
+  return [];
+};
+
 export const listLandingPages = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const qRaw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
@@ -195,9 +234,20 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
     });
 
     const rawSourceOptions = (sourceSetting as any)?.value;
-    const sourceOptions = Array.isArray(rawSourceOptions)
-      ? rawSourceOptions.map((s: any) => String(s).trim()).filter(Boolean)
-      : [];
+    let sourceOptions = parseSourceOptions(rawSourceOptions);
+    if (sourceOptions.length === 0) {
+      try {
+        const [rows] = await sequelize.query(
+          "SELECT DISTINCT source FROM landing_pages WHERE source IS NOT NULL AND TRIM(source) <> '' ORDER BY source ASC"
+        );
+        const dbSources = Array.isArray(rows) ? rows.map((r: any) => normalizeSource(r?.source)).filter(Boolean) : [];
+        sourceOptions = dbSources;
+      } catch {
+      }
+    }
+    sourceOptions = Array.from(new Set(sourceOptions)).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
 
     res.json({ items, total: result.count, page, pageSize, sourceOptions });
   } catch {
