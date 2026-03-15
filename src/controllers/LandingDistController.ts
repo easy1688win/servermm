@@ -57,7 +57,7 @@ const renderIndexHtml = (configJson: string) => {
 };
 
 const renderStyleCss = () => {
-  return `/* 基础重置与全局设置 */
+  return `/* 基础重置 */
 * {
   margin: 0;
   padding: 0;
@@ -65,32 +65,28 @@ const renderStyleCss = () => {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* 锁定视口，防止出现滚动条 */
 html, body {
   height: 100%;
   width: 100%;
   overflow: hidden;
-  background-color: #050505;
-  font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: #ffffff;
+  background-color: #000;
+  font-family: "Inter", -apple-system, sans-serif;
 }
 
-/* 布局容器 */
+/* 布局容器：强制占据 100% 物理屏幕宽高 */
 .container {
   position: relative;
-  height: 100vh;
   width: 100vw;
+  /* 使用 dvh 确保在移动端浏览器弹出地址栏时依然全屏 */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+  overflow: hidden;
 }
 
-/* 背景图片动画：更缓慢平滑的呼吸缩放 */
-@keyframes bg-zoom {
-  0% { transform: scale(1); }
-  50% { transform: scale(1.1); }
-  100% { transform: scale(1); }
-}
-
+/* 背景图片容器 */
 .hero {
   position: absolute;
   top: 0;
@@ -101,12 +97,14 @@ html, body {
 }
 
 .hero img {
+  /* 强制图片宽高 100% 填满容器 */
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: center;
-  filter: brightness(0.6) saturate(1.2);
-  animation: bg-zoom 20s infinite ease-in-out;
+  /* 核心修改：使用 fill 确保图片像右图那样 100% 还原并全屏，不留任何黑边 */
+  object-fit: fill;
+  /* 移除缩放动画，因为全屏锁定下缩放会产生黑边或裁切 */
+  animation: none;
+  filter: brightness(0.8);
 }
 
 /* 底部内容卡片区 */
@@ -114,118 +112,81 @@ html, body {
   position: relative;
   z-index: 2;
   width: 100%;
-  padding: 100px 24px calc(6vh + env(safe-area-inset-bottom));
+  /* 增加底部安全区距离，确保按钮在 iPhone 底部横条上方 */
+  padding: 40px 24px calc(20px + env(safe-area-inset-bottom));
   text-align: center;
+  /* 阴影遮罩，确保文字在复杂的背景图上依然清晰 */
   background: linear-gradient(to top,
-    rgba(0,0,0,0.95) 0%,
-    rgba(0,0,0,0.7) 50%,
-    rgba(0,0,0,0.2) 80%,
+    rgba(0,0,0,0.85) 0%,
+    rgba(0,0,0,0.4) 60%,
     transparent 100%);
 }
 
-/* 标题设计：字间距紧凑，现代感强 */
+/* 文字排版 */
 .title {
-  font-size: clamp(2rem, 10vw, 3.8rem);
+  font-size: clamp(1.6rem, 8vw, 3rem);
   font-weight: 800;
   color: #fff;
-  line-height: 1.05;
-  letter-spacing: -0.04em;
-  margin-bottom: 16px;
-  text-transform: capitalize;
-  inline-size: 100%;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  text-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  line-height: 1.1;
+  margin-bottom: 8px;
+  text-shadow: 0 4px 12px rgba(0,0,0,0.6);
 }
 
-/* 副标题：优雅的半透明设计 */
 .subtitle {
-  font-size: clamp(1rem, 4.5vw, 1.15rem);
-  color: rgba(255, 255, 255, 0.7);
-  font-weight: 400;
-  line-height: 1.6;
-  margin-bottom: 40px;
-  max-width: 90%;
-  margin-left: auto;
-  margin-right: auto;
-  inline-size: 100%;
-  overflow-wrap: break-word;
-  word-break: break-word;
+  font-size: clamp(0.9rem, 4vw, 1.1rem);
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 24px;
 }
 
-/* 按钮容器 */
+/* 按钮样式 */
 .cta {
   width: 100%;
-  max-width: 320px;
+  max-width: 300px;
   margin: 0 auto;
 }
 
-/* 现代扫光动画 */
-@keyframes sweep {
-  0% { transform: translateX(-150%) skewX(-25deg); }
-  100% { transform: translateX(250%) skewX(-25deg); }
-}
-
-/* 按钮基础样式 */
 .btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 64px;
+  height: 60px;
   width: 100%;
-  border-radius: 18px;
+  border-radius: 16px;
   text-decoration: none;
-  font-weight: 600;
+  font-weight: 700;
   font-size: 1.1rem;
-  transition: all 0.3s cubic-bezier(0.23, 1, 0.32, 1);
-  border: none;
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
-/* 主按钮：电光紫渐变 */
 #primary-cta {
   background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
   color: #ffffff;
-  box-shadow: 0 12px 24px rgba(99, 102, 241, 0.3);
+  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.3);
 }
 
-/* 次要按钮：磨砂玻璃效果 */
-#secondary-cta {
-  background: rgba(255, 255, 255, 0.1);
-  color: #ffffff;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  margin-bottom: 0;
-}
-
-/* 按钮内部扫光效果 */
+/* 扫光动画 */
 .btn::after {
   content: "";
   position: absolute;
   top: 0;
-  left: 0;
-  width: 40%;
+  left: -150%;
+  width: 50%;
   height: 100%;
-  background: linear-gradient(
-    to right,
-    transparent,
-    rgba(255, 255, 255, 0.2),
-    transparent
-  );
-  animation: sweep 4s infinite ease-in-out;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  animation: sweep 4s infinite linear;
 }
 
-/* 点击反馈 */
+@keyframes sweep {
+  0% { left: -150%; }
+  50% { left: 150%; }
+  100% { left: 150%; }
+}
+
 .btn:active {
   transform: scale(0.96);
-  filter: brightness(0.9);
-}
-
-#primary-cta:hover {
-  box-shadow: 0 15px 30px rgba(99, 102, 241, 0.45);
 }`;
 };
 
