@@ -1,11 +1,12 @@
 {
   "name": "backend",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "",
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/server.ts",
     "build": "npm version patch --no-git-tag-version --force && tsc",
+    "build:ci": "tsc",
     "start": "node dist/server.js",
     "db:fix": "ts-node src/scripts/checkDb.ts",
     "db:install": "ts-node src/scripts/initDb.ts",

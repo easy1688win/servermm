@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { UAParser } from 'ua-parser-js';
 import { LandingPageEvent, LandingPageVisit } from '../models';
 import { encrypt, isEncrypted } from '../utils/encryption';
+import { getCache, setCache } from '../services/CacheService';
 
 const GIF_1X1_BASE64 = 'R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 const GIF_1X1_BUFFER = Buffer.from(GIF_1X1_BASE64, 'base64');
@@ -124,7 +125,16 @@ const sendGif = (res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Timing-Allow-Origin', '*');
   res.status(200).send(GIF_1X1_BUFFER);
+};
+
+const dedupeOnce = (key: string, ttlSeconds: number): boolean => {
+  const existing = getCache(key);
+  if (existing) return true;
+  setCache(key, true, ttlSeconds);
+  return false;
 };
 
 export const trackLandingPageViewGif = async (req: Request, res: Response) => {
@@ -143,6 +153,23 @@ export const trackLandingPageViewGif = async (req: Request, res: Response) => {
   const refParts = safeUrlParts(refRaw);
 
   const sessionId = safeShortText(req.query.sid, 64);
+  const pageViewDedupeKey = crypto
+    .createHash('sha1')
+    .update(
+      [
+        'lp_pv',
+        String(landingPageId),
+        String(sessionId || ''),
+        String(pageUrl || ''),
+        String(refParts.origin || ''),
+        String(req.query.ts || ''),
+      ].join('|')
+    )
+    .digest('hex');
+
+  if (dedupeOnce(`lp_dedupe:${pageViewDedupeKey}`, 3)) {
+    return sendGif(res);
+  }
 
   const ipEnc =
     shouldStoreIpEnc() && ip
@@ -197,6 +224,24 @@ export const trackLandingEventGif = async (req: Request, res: Response) => {
   const sessionId = safeShortText(req.query.sid, 64);
   const eventName = safeShortText(req.query.ev, 64) || 'event';
   const elementId = safeShortText(req.query.el, 64);
+  const eventDedupeKey = crypto
+    .createHash('sha1')
+    .update(
+      [
+        'lp_ev',
+        String(landingPageId),
+        String(sessionId || ''),
+        String(eventName || ''),
+        String(elementId || ''),
+        String(req.query.u || ''),
+        String(req.query.ts || ''),
+      ].join('|')
+    )
+    .digest('hex');
+
+  if (dedupeOnce(`lp_dedupe:${eventDedupeKey}`, 2)) {
+    return sendGif(res);
+  }
 
   const ipEnc =
     shouldStoreIpEnc() && ip

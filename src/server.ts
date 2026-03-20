@@ -61,8 +61,21 @@ const corsOptions: cors.CorsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use('/lp', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('Timing-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 app.options(/.*/, cors(corsOptions));
 app.use(cookieParser());
+app.use(express.text({ type: 'text/plain', limit: '5mb' }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
@@ -73,6 +86,8 @@ app.set('trust proxy', 1);
 app.use(checkMaintenanceMode);
 app.get('/lp/pv.gif', trackLandingPageViewGif);
 app.get('/lp/event.gif', trackLandingEventGif);
+app.post('/lp/pv.gif', trackLandingPageViewGif);
+app.post('/lp/event.gif', trackLandingEventGif);
 app.use('/api', routes);
 
 app.get('/', (req, res) => {
