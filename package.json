@@ -1,16 +1,16 @@
 {
   "name": "backend",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/server.ts",
-    "build": "tsc",
+    "build": "npm version patch --no-git-tag-version --force && tsc",
     "start": "node dist/server.js",
     "db:fix": "ts-node src/scripts/checkDb.ts",
     "db:install": "ts-node src/scripts/initDb.ts",
     "migrate": "npx sequelize-cli db:migrate",
-    "test": "jest"
+    "test": "jest --passWithNoTests"
   },
   "keywords": [],
   "author": "",

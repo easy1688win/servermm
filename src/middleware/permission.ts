@@ -4,7 +4,7 @@ import { AuthRequest } from './auth';
 export const requirePermission = (requiredPermission: string) => {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required' });
+      return res.status(401).json({ message: 'API Access Denied.' });
     }
 
     const userPermissions = req.user.permissions || [];
@@ -20,7 +20,7 @@ export const requirePermission = (requiredPermission: string) => {
 export const requireAnyPermission = (requiredPermissions: string[]) => {
     return (req: AuthRequest, res: Response, next: NextFunction) => {
       if (!req.user) {
-        return res.status(401).json({ message: 'Authentication required' });
+        return res.status(401).json({ message: 'API Access Denied.' });
       }
   
       const userPermissions = req.user.permissions || [];

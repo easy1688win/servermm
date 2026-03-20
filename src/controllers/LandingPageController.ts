@@ -538,7 +538,20 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
       raw: true,
     } as any);
 
-    const [pv, uv, clicks, byOs, byRef, byBrowser, byDevice, byLanguage, clicksByEvent] = await Promise.all([
+    const byIpPromise = LandingPageVisit.findAll({
+      attributes: [
+        'ip_hash',
+        [sequelize.fn('MIN', sequelize.col('ip_enc')), 'ip_enc'],
+        [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
+      ],
+      where: whereRange,
+      group: ['ip_hash'],
+      order: [[sequelize.literal('count'), 'DESC']],
+      limit: 20,
+      raw: true,
+    } as any);
+
+    const [pv, uv, clicks, byOs, byRef, byBrowser, byDevice, byLanguage, clicksByEvent, byIp] = await Promise.all([
       pvPromise,
       uvPromise,
       clickPromise,
@@ -548,6 +561,7 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
       byDevicePromise,
       byLanguagePromise,
       clicksByEventPromise,
+      byIpPromise,
     ]);
 
     const byReferrerHostMap = new Map<string, number>();
@@ -570,6 +584,9 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
       byDeviceType: (byDevice as any[]).map((r: any) => ({ device_type: formatDeviceLabel(r.device_type), count: toCount(r.count) })),
       byLanguage: (byLanguage as any[]).map((r: any) => ({ language: formatLanguageTag(r.language), count: toCount(r.count) })),
       clicksByEvent: (clicksByEvent as any[]).map((r: any) => ({ event_name: r.event_name, count: toCount(r.count) })),
+      byIp: (byIp as any[])
+        .map((r: any) => ({ ip: tryDecryptIp(r.ip_enc) || '-', count: toCount(r.count) }))
+        .filter((r: any) => Boolean(r.ip) && r.ip !== '-'),
     });
   } catch {
     res.status(500).json({ message: 'LP201' });

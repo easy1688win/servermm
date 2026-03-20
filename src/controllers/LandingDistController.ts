@@ -214,14 +214,149 @@ const renderAppJs = () => {
   function getOrCreateSid(){
     try{
       var key = 'lp_sid';
-      var v = localStorage.getItem(key);
-      if(v){ return v; }
-      var sid = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(16) + Math.random().toString(16).slice(2));
-      localStorage.setItem(key, sid);
-      return sid;
-    }catch(e){
-      return Date.now().toString(16) + Math.random().toString(16).slice(2);
-    }
+      
+      // Enhanced iOS 14+ detection 
+      var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent); 
+      var isIOS14OrHigher = false; 
+      var isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); 
+      
+      if (isIOS) { 
+        try { 
+          var match = navigator.userAgent.match(/OS (\\d+)_(\\d+)/); 
+          if (match && parseInt(match[1]) >= 14) { 
+            isIOS14OrHigher = true; 
+          } 
+        } catch(e) {} 
+      } 
+      
+      // iOS 14+ Safari: Prioritize sessionStorage over localStorage (ITP compatibility) 
+      if (isIOS14OrHigher && isSafari) { 
+        try { 
+          var v = sessionStorage.getItem(key); 
+          if(v){ return v; } 
+        } catch(e) {} 
+        
+        try { 
+          v = localStorage.getItem(key); 
+          if(v){ return v; } 
+        } catch(e) {} 
+      } else { 
+        // Non-iOS 14+: Standard localStorage first 
+        try { 
+          var v = localStorage.getItem(key); 
+          if(v){ return v; } 
+        } catch(e) {} 
+        
+        try { 
+          v = sessionStorage.getItem(key); 
+          if(v){ return v; } 
+        } catch(e) {} 
+      } 
+      
+      // Fallback to first-party cookie with enhanced iOS 14+ compatibility 
+      try { 
+        var cookies = document.cookie.split(';'); 
+        for(var i = 0; i < cookies.length; i++) { 
+          var cookie = cookies[i].trim(); 
+          if(cookie.indexOf(key + '=') === 0) { 
+            return cookie.substring(key.length + 1); 
+          } 
+        } 
+      } catch(e) {} 
+      
+      // Generate new session ID with enhanced entropy 
+      var sid; 
+      if (crypto && crypto.randomUUID) { 
+        sid = crypto.randomUUID(); 
+      } else if (crypto && crypto.getRandomValues) { 
+        var array = new Uint8Array(16); 
+        crypto.getRandomValues(array); 
+        sid = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join(''); 
+      } else { 
+        sid = Date.now().toString(16) + Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2); 
+      } 
+      
+      // Store in all available storage methods with iOS 14+ considerations 
+      var storageSuccess = { localStorage: false, sessionStorage: false, cookie: false }; 
+      
+      // localStorage with quota management 
+      try { 
+        localStorage.setItem(key, sid); 
+        storageSuccess.localStorage = true; 
+      } catch(e) { 
+        // Handle quota exceeded 
+        try { 
+          // Clear old tracking data if quota is full 
+          var keysToRemove = []; 
+          for (var i = 0; i < localStorage.length; i++) { 
+            var lsKey = localStorage.key(i); 
+            if (lsKey && lsKey.startsWith('lp_') && lsKey !== key) { 
+              keysToRemove.push(lsKey); 
+            } 
+          } 
+          keysToRemove.forEach(function(k) { localStorage.removeItem(k); }); 
+          localStorage.setItem(key, sid); 
+          storageSuccess.localStorage = true; 
+        } catch(e2) {} 
+      } 
+      
+      // sessionStorage 
+      try { 
+        sessionStorage.setItem(key, sid); 
+        storageSuccess.sessionStorage = true; 
+      } catch(e) {} 
+      
+      // Enhanced cookie setting for iOS 14+ compatibility 
+      try { 
+        var expires = new Date(); 
+        expires.setFullYear(expires.getFullYear() + 1); 
+        var cookieString = key + '=' + sid + '; expires=' + expires.toUTCString() + '; path=/; SameSite=Lax'; 
+        
+        // Add secure flag for HTTPS 
+        if (location.protocol === 'https:') { 
+          cookieString += '; Secure'; 
+        } 
+        
+        // iOS 14+ Safari: Avoid domain attribute to prevent third-party cookie classification 
+        // Only set domain for non-Safari browsers or when not on iOS 14+ 
+        if (!isIOS14OrHigher || !isSafari) { 
+          if (location.hostname.indexOf('.') > -1) { 
+            var domainParts = location.hostname.split('.'); 
+            if (domainParts.length > 2) { 
+              cookieString += '; domain=.' + domainParts.slice(-2).join('.'); 
+            } else { 
+              cookieString += '; domain=.' + location.hostname; 
+            } 
+          } 
+        } 
+        
+        document.cookie = cookieString; 
+        
+        // Verify cookie was set successfully 
+        var testCookie = document.cookie.split(';').find(function(c) { 
+          return c.trim().indexOf(key + '=') === 0; 
+        }); 
+        storageSuccess.cookie = !!testCookie; 
+        
+      } catch(e) {} 
+      
+      // Store success metrics for debugging 
+      try { 
+        var metrics = { 
+          timestamp: Date.now(), 
+          isIOS14OrHigher: isIOS14OrHigher, 
+          isSafari: isSafari, 
+          storageSuccess: storageSuccess, 
+          userAgent: navigator.userAgent.slice(0, 100) 
+        }; 
+        sessionStorage.setItem('lp_sid_metrics', JSON.stringify(metrics)); 
+      } catch(e) {} 
+      
+      return sid; 
+    }catch(e){ 
+      // Ultimate fallback 
+      return 'fallback_' + Date.now().toString(16) + Math.random().toString(16).slice(2); 
+    } 
   }
 
   function qs(){
@@ -239,7 +374,21 @@ const renderAppJs = () => {
     try{
       var i = new Image();
       i.referrerPolicy = 'strict-origin-when-cross-origin';
-      i.src = url;
+      
+      // iOS 14+ compatibility: Add load and error handlers 
+      i.onload = function() { 
+        // Tracking pixel loaded successfully 
+      }; 
+      i.onerror = function() { 
+        // Fallback: try with different referrer policy for iOS 14+ 
+        try { 
+          var fallbackImg = new Image(); 
+          fallbackImg.referrerPolicy = 'no-referrer-when-downgrade'; 
+          fallbackImg.src = url; 
+        } catch(e) {} 
+      }; 
+      
+      i.src = url; 
     }catch(e){}
   }
 
@@ -249,14 +398,43 @@ const renderAppJs = () => {
     var u = encodeURIComponent(location.href);
     var r = encodeURIComponent(document.referrer || '');
     var q = qs();
-    var base = trackBase + (kind === 'pv' ? '/lp/pv.gif' : '/lp/event.gif');
+    
+    // Use production tracking endpoints 
+    var base = trackBase + (kind === 'pv' ? '/lp/pv.gif' : '/lp/event.gif'); 
+    
     var tz = '';
     try{ tz = String((new Date()).getTimezoneOffset()); }catch(e){}
     var lang = '';
     try{ lang = String(navigator.language || ''); }catch(e){}
     var sc = '';
     try{ sc = String(window.screen && window.screen.width ? (window.screen.width + 'x' + window.screen.height) : ''); }catch(e){}
-    var url = base + '?lp=' + encodeURIComponent(lp) + '&sid=' + sid + '&u=' + u + '&r=' + r;
+    
+    // Enhanced iOS 14+ detection and compatibility 
+    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent); 
+    var isIOS14OrHigher = false; 
+    var isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); 
+    var isPrivateMode = false; 
+    
+    if (isIOS) { 
+      try { 
+        var match = navigator.userAgent.match(/OS (\\d+)_(\\d+)/); 
+        if (match && parseInt(match[1]) >= 14) { 
+          isIOS14OrHigher = true; 
+        } 
+      } catch(e) {} 
+    } 
+    
+    // Detect private browsing mode 
+    try { 
+      if (typeof localStorage !== 'undefined') { 
+        localStorage.setItem('private_test', 'test'); 
+        localStorage.removeItem('private_test'); 
+      } 
+    } catch(e) { 
+      isPrivateMode = true; 
+    } 
+    
+    var url = base + '?lp=' + encodeURIComponent(lp) + '&sid=' + sid + '&u=' + u + '&r=' + r; 
     if(tz){ url += '&tz=' + encodeURIComponent(tz); }
     if(lang){ url += '&lang=' + encodeURIComponent(lang); }
     if(sc){ url += '&sc=' + encodeURIComponent(sc); }
@@ -265,7 +443,105 @@ const renderAppJs = () => {
       url += '&ev=' + encodeURIComponent(ev || 'event');
       if(el){ url += '&el=' + encodeURIComponent(el); }
     }
-    img(url);
+    
+    // Add enhanced iOS 14+ and compatibility parameters 
+    if (isIOS14OrHigher) { 
+      url += '&ios14=1'; 
+      url += '&safari=' + (isSafari ? '1' : '0'); 
+      url += '&private=' + (isPrivateMode ? '1' : '0'); 
+      url += '&ts=' + Date.now(); 
+    } 
+    
+    // Add storage success metrics 
+    try { 
+      var metrics = sessionStorage.getItem('lp_sid_metrics'); 
+      if (metrics) { 
+        var parsed = JSON.parse(metrics); 
+        url += '&ls=' + (parsed.storageSuccess.localStorage ? '1' : '0'); 
+        url += '&ss=' + (parsed.storageSuccess.sessionStorage ? '1' : '0'); 
+        url += '&ck=' + (parsed.storageSuccess.cookie ? '1' : '0'); 
+      } 
+    } catch(e) {} 
+    
+    // Enhanced tracking methods for iOS 14+ 
+    var trackingAttempts = []; 
+    
+    // Method 1: Standard image pixel (always try first) 
+    try { 
+      img(url); 
+      trackingAttempts.push('image'); 
+    } catch(e) { 
+      trackingAttempts.push('image_failed'); 
+    } 
+    
+    // Method 2: Send Beacon (iOS 14+ compatible) 
+    if (navigator.sendBeacon && (isIOS14OrHigher || kind !== 'pv')) { 
+      try { 
+        var beaconData = url.split('?').slice(1).join('?'); 
+        var beaconUrl = url.split('?')[0]; 
+        var success = navigator.sendBeacon(beaconUrl + '?' + beaconData); 
+        if (success) { 
+          trackingAttempts.push('beacon'); 
+        } else { 
+          trackingAttempts.push('beacon_failed'); 
+        } 
+      } catch(e) { 
+        trackingAttempts.push('beacon_error'); 
+      } 
+    } 
+    
+    // Method 3: Fetch with keepalive (iOS 14+ fallback) 
+    if (isIOS14OrHigher && kind !== 'pv' && window.fetch) { 
+      try { 
+        fetch(url, { 
+          method: 'GET', 
+          mode: 'no-cors', 
+          cache: 'no-cache', 
+          keepalive: true, 
+          priority: 'low' 
+        }).then(function() { 
+          trackingAttempts.push('fetch_success'); 
+        }).catch(function() { 
+          trackingAttempts.push('fetch_failed'); 
+        }); 
+      } catch(e) { 
+        trackingAttempts.push('fetch_error'); 
+      } 
+    } 
+    
+    // Method 4: XHR fallback for critical events 
+    if (isIOS14OrHigher && kind !== 'pv' && window.XMLHttpRequest) { 
+      try { 
+        var xhr = new XMLHttpRequest(); 
+        xhr.open('GET', url, true); 
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest'); 
+        xhr.withCredentials = false; // Important for iOS 14+ 
+        xhr.timeout = 3000; 
+        xhr.send(); 
+        trackingAttempts.push('xhr'); 
+      } catch(e) { 
+        trackingAttempts.push('xhr_error'); 
+      } 
+    } 
+    
+    // Log tracking attempts for debugging 
+    try { 
+      var trackingLog = { 
+        timestamp: Date.now(), 
+        kind: kind, 
+        attempts: trackingAttempts, 
+        isIOS14OrHigher: isIOS14OrHigher, 
+        isSafari: isSafari, 
+        isPrivateMode: isPrivateMode 
+      }; 
+      var existingLog = JSON.parse(sessionStorage.getItem('lp_tracking_log') || '[]'); 
+      existingLog.push(trackingLog); 
+      // Keep only last 10 entries 
+      if (existingLog.length > 10) { 
+        existingLog = existingLog.slice(-10); 
+      } 
+      sessionStorage.setItem('lp_tracking_log', JSON.stringify(existingLog)); 
+    } catch(e) {} 
   }
 
   track('pv');

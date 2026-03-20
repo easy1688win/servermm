@@ -21,7 +21,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
   let token = req.cookies?._T || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
   if (!token) {
-    return res.status(401).json({ message: 'Authentication required' });
+    return res.status(401).json({ message: 'API Access Denied.' });
   }
 
   if (isEncrypted(token)) {
