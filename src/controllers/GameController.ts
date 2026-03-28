@@ -3,7 +3,7 @@ import { Game, GameAdjustment, Product, Transaction } from '../models';
 import { logAudit } from '../services/AuditService';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
-import { encrypt, isEncrypted } from '../utils/encryption';
+import { decrypt, encrypt, isEncrypted } from '../utils/encryption';
 import { VendorFieldDef, getVendorFieldDefsFromKeys, isAllowedVendorFieldKey } from '../vendors/vendorFieldRegistry';
 import { sendSuccess, sendError } from '../utils/response';
 
@@ -87,13 +87,23 @@ const maskSecretValue = (value: any): any => {
   return '******';
 };
 
-const getVendorConfigValue = (config: Record<string, any>, key: string) => {
-  if (key in config) return (config as any)[key];
-  const lower = key.toLowerCase();
-  for (const k of Object.keys(config)) {
-    if (k.toLowerCase() === lower) return (config as any)[k];
+const normalizeVendorConfigRaw = (raw: any): Record<string, any> | null => {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!(s.startsWith('{') || s.startsWith('['))) return null;
+    try {
+      raw = JSON.parse(s);
+    } catch {
+      return null;
+    }
   }
-  return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw as Record<string, any>;
+};
+
+export const __test__ = {
+  normalizeVendorConfigRaw,
 };
 
 const validateAndBuildVendorConfig = (
@@ -102,20 +112,10 @@ const validateAndBuildVendorConfig = (
   mode: 'create' | 'update',
   existingConfig?: Record<string, any> | null,
 ): { config: Record<string, any>; error?: string } => {
-  const allowedKeyMap = new Map<string, string>();
-  for (const f of fields) {
-    allowedKeyMap.set(f.key.toLowerCase(), f.key);
-  }
-  const allowedKeys = new Set(fields.map((f) => f.key));
+  const base: Record<string, any> =
+    mode === 'update' ? (normalizeVendorConfigRaw(existingConfig) ? { ...(normalizeVendorConfigRaw(existingConfig) as any) } : {}) : {};
 
-  const base: Record<string, any> = {};
-  if (mode === 'update' && existingConfig && typeof existingConfig === 'object') {
-    for (const k of Object.keys(existingConfig)) {
-      const canonical = allowedKeyMap.get(k.toLowerCase());
-      if (!canonical) continue;
-      base[canonical] = (existingConfig as any)[k];
-    }
-  }
+  const allowedKeys = new Set(fields.map((f) => f.key));
 
   if (rawConfig === undefined || rawConfig === null) {
     if (mode === 'create' && allowedKeys.size > 0) return { config: {}, error: 'G201' };
@@ -126,18 +126,15 @@ const validateAndBuildVendorConfig = (
     return { config: {}, error: 'G202' };
   }
 
-  const normalizedRaw: Record<string, any> = {};
   for (const key of Object.keys(rawConfig)) {
-    const canonical = allowedKeyMap.get(key.toLowerCase());
-    if (!canonical) {
+    if (!allowedKeys.has(key)) {
       return { config: {}, error: 'G203' };
     }
-    normalizedRaw[canonical] = (rawConfig as any)[key];
   }
 
   for (const def of fields) {
-    if (!(def.key in normalizedRaw)) continue;
-    const value = (normalizedRaw as any)[def.key];
+    if (!(def.key in rawConfig)) continue;
+    const value = (rawConfig as any)[def.key];
 
     if (value === undefined) continue;
     if (value === null || value === '') {
@@ -181,11 +178,16 @@ const maskVendorConfigForResponse = (
   fields: VendorFieldDef[],
   config: any,
 ): Record<string, any> | null => {
-  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  const normalized = normalizeVendorConfigRaw(config);
+  if (!normalized) return null;
   const out: Record<string, any> = {};
   for (const def of fields) {
-    const v = getVendorConfigValue(config as any, def.key);
-    if (v === undefined) continue;
+    if (!(def.key in normalized)) continue;
+    const v = (normalized as any)[def.key];
+    if (def.key === 'signatureKey' && typeof v === 'string') {
+      out[def.key] = isEncrypted(v) ? decrypt(v) : v;
+      continue;
+    }
     out[def.key] = def.secret ? maskSecretValue(v) : v;
   }
   return out;

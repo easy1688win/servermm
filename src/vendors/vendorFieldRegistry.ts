@@ -42,4 +42,3 @@ export const getVendorFieldDefsFromKeys = (keys: string[]): VendorFieldDef[] => 
   }
   return out;
 };
-

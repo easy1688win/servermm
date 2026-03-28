@@ -42,36 +42,38 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
     }
 
     const vendorConfig = game.vendor_config;
-    if (!vendorConfig || typeof vendorConfig !== 'object') {
+    let normalizedConfig: any = vendorConfig;
+    if (typeof normalizedConfig === 'string') {
+      const s = normalizedConfig.trim();
+      if (s.startsWith('{') || s.startsWith('[')) {
+        try {
+          normalizedConfig = JSON.parse(s);
+        } catch {
+          normalizedConfig = null;
+        }
+      } else {
+        normalizedConfig = null;
+      }
+    }
+
+    if (!normalizedConfig || typeof normalizedConfig !== 'object') {
       throw new Error('Game vendor configuration not found');
     }
 
-    const cfg = vendorConfig as Record<string, any>;
-    const getValue = (key: string) => {
-      if (key in cfg) return cfg[key];
-      const lower = key.toLowerCase();
-      for (const k of Object.keys(cfg)) {
-        if (k.toLowerCase() === lower) return cfg[k];
-      }
-      return undefined;
-    };
-    const apiUrl = getValue('apiUrl');
-    const appId = getValue('appId');
-    const signatureKey = getValue('signatureKey');
+    const { apiUrl, appId, signatureKey } = normalizedConfig as Record<string, string>;
 
     if (!apiUrl || !appId || !signatureKey) {
       throw new Error('Missing required Joker configuration (apiUrl, appId, signatureKey)');
     }
 
     // Decrypt signature key if it's encrypted
-    const signatureKeyStr = String(signatureKey);
-    const decryptedSignatureKey = isEncrypted(signatureKeyStr)
+    const decryptedSignatureKey = isEncrypted(signatureKey)
       ? decrypt(signatureKey)
-      : signatureKeyStr;
+      : signatureKey;
 
     const config: JokerConfig = {
-      apiUrl: String(apiUrl),
-      appId: String(appId),
+      apiUrl,
+      appId,
       signatureKey: decryptedSignatureKey,
     };
 
