@@ -1473,6 +1473,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         if (!finalAccountId) finalAccountId = baseAccountId;
         let result: any = null;
         let created = false;
+        let recoveredExisting = false;
         for (let attempt = 0; attempt < 3; attempt++) {
           const candidate =
             attempt === 0 ? finalAccountId : (() => {
@@ -1493,6 +1494,12 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
             break;
           }
           if (isVendorConflict(result)) {
+            if (attempt === 0) {
+              finalAccountId = candidate;
+              created = true;
+              recoveredExisting = true;
+              break;
+            }
             continue;
           }
           break;
@@ -1551,7 +1558,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         // 记录审计日志
         await logAudit(
           req.user?.id ?? null,
-          'VENDOR_CREATE_PLAYER',
+          recoveredExisting ? 'VENDOR_CREATE_PLAYER_RECOVERED_EXISTING' : 'VENDOR_CREATE_PLAYER',
           { gameId: game.id, gameName: gameName, username: finalAccountId },
           { success: true, status: result?.status, message: result?.message },
           getClientIp(req) || null
