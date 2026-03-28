@@ -50,6 +50,18 @@ const ensureGamesSynced = async () => {
 };
 
 const normalizeVendorFieldKeys = (raw: any): string[] => {
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s.startsWith('[') || s.startsWith('{')) {
+      try {
+        raw = JSON.parse(s);
+      } catch {
+        return [];
+      }
+    } else {
+      return [];
+    }
+  }
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
   const seen = new Set<string>();

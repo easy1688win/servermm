@@ -19,6 +19,18 @@ const ensureProductSynced = async () => {
 
 const normalizeVendorFieldKeys = (raw: any): string[] | null => {
   if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s.startsWith('[') || s.startsWith('{')) {
+      try {
+        raw = JSON.parse(s);
+      } catch {
+        return null;
+      }
+    } else {
+      return null;
+    }
+  }
   if (!Array.isArray(raw)) return null;
 
   const out: string[] = [];
@@ -40,6 +52,15 @@ const normalizeVendorFieldKeys = (raw: any): string[] | null => {
 
   if (out.length > 40) return null;
   return out;
+};
+
+const shapeProductForResponse = (item: any) => {
+  const json = item && typeof item.toJSON === 'function' ? item.toJSON() : item;
+  const vendorFields = normalizeVendorFieldKeys((json as any)?.vendorFields);
+  return {
+    ...json,
+    vendorFields: vendorFields === null ? null : vendorFields,
+  };
 };
 
 const getFixedProviderCode = (provider: string): number => {
@@ -74,7 +95,7 @@ export const getAll = async (req: AuthRequest, res: Response): Promise<void> => 
         ['providerCode', 'ASC'],
       ],
     });
-    sendSuccess(res, 'Code1', items);
+    sendSuccess(res, 'Code1', (items as any[]).map(shapeProductForResponse));
   } catch (error) {
     sendError(res, 'Code425', 500); // Error fetching products
   }
@@ -116,7 +137,7 @@ export const create = async (req: AuthRequest, res: Response): Promise<void> => 
       getClientIp(req) || undefined,
     );
 
-    sendSuccess(res, 'Code428', item, undefined, 201); // Product created
+    sendSuccess(res, 'Code428', shapeProductForResponse(item), undefined, 201); // Product created
   } catch (error) {
     sendError(res, 'Code429', 500); // Error creating product
   }
@@ -188,7 +209,7 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
       getClientIp(req) || undefined,
     );
 
-    sendSuccess(res, 'Code433', item); // Product updated
+    sendSuccess(res, 'Code433', shapeProductForResponse(item)); // Product updated
   } catch (error) {
     sendError(res, 'Code434', 500); // Error updating product
   }
