@@ -1008,7 +1008,6 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     let finalAccountId = baseAccountId;
     let result: any = null;
     let created = false;
-    let recoveredExisting = false;
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const candidate =
@@ -1029,12 +1028,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
         created = true;
         break;
       }
-      if (isVendorConflict(result)) {
-        finalAccountId = candidate;
-        created = true;
-        recoveredExisting = true;
-        break;
-      }
+      if (isVendorConflict(result)) continue;
       break;
     }
 
@@ -1102,7 +1096,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
 
     await logAudit(
       req.user?.id ?? null,
-      recoveredExisting ? 'VENDOR_RETRY_CREATE_RECOVERED_EXISTING' : 'VENDOR_RETRY_CREATE_SUCCESS',
+      'VENDOR_RETRY_CREATE_SUCCESS',
       { playerId, gameName, accountId: finalAccountId },
       { passwordSet: pwdResult.success, attemptedIds },
       getClientIp(req) || null
@@ -1110,7 +1104,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
 
     sendSuccess(res, 'Code1', {
       gameAccount: { gameName, accountId: finalAccountId, password, provisioningStatus: 'CREATED', attemptedIds },
-      idempotent: recoveredExisting,
+      idempotent: false,
       passwordSet: pwdResult.success,
     });
   } catch (error: any) {
@@ -1473,7 +1467,6 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         if (!finalAccountId) finalAccountId = baseAccountId;
         let result: any = null;
         let created = false;
-        let recoveredExisting = false;
         for (let attempt = 0; attempt < 3; attempt++) {
           const candidate =
             attempt === 0 ? finalAccountId : (() => {
@@ -1494,12 +1487,6 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
             break;
           }
           if (isVendorConflict(result)) {
-            if (attempt === 0) {
-              finalAccountId = candidate;
-              created = true;
-              recoveredExisting = true;
-              break;
-            }
             continue;
           }
           break;
@@ -1558,7 +1545,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         // 记录审计日志
         await logAudit(
           req.user?.id ?? null,
-          recoveredExisting ? 'VENDOR_CREATE_PLAYER_RECOVERED_EXISTING' : 'VENDOR_CREATE_PLAYER',
+          'VENDOR_CREATE_PLAYER',
           { gameId: game.id, gameName: gameName, username: finalAccountId },
           { success: true, status: result?.status, message: result?.message },
           getClientIp(req) || null

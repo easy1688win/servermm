@@ -146,6 +146,7 @@ export class JokerProvider {
    * Make HTTP request to Joker API
    */
   private async request(method: string, body: any): Promise<JokerResponse> {
+    const startedAt = Date.now();
     const timestamp = Math.floor(Date.now() / 1000);
     const signature = this.generateSignature(timestamp);
 
@@ -160,26 +161,13 @@ export class JokerProvider {
     };
 
     try {
-      const fetchOnce = async (urlStr: string) => {
-        return await fetch(urlStr, {
-          method: 'POST',
-          redirect: 'manual',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody),
-        });
-      };
-
-      let response = await fetchOnce(url.toString());
-      if (response.status === 301 || response.status === 302 || response.status === 303 || response.status === 307 || response.status === 308) {
-        const location = response.headers.get('location');
-        if (!location) {
-          return { success: false, error: `HTTP redirect without location: ${response.status}` };
-        }
-        const nextUrl = new URL(location, url.toString());
-        response = await fetchOnce(nextUrl.toString());
-      }
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
 
       if (!response.ok) {
         // Handle specific error cases
