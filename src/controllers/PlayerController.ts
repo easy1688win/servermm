@@ -1008,6 +1008,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     let finalAccountId = baseAccountId;
     let result: any = null;
     let created = false;
+    let recoveredExisting = false;
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const candidate =
@@ -1028,7 +1029,12 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
         created = true;
         break;
       }
-      if (isVendorConflict(result)) continue;
+      if (isVendorConflict(result)) {
+        finalAccountId = candidate;
+        created = true;
+        recoveredExisting = true;
+        break;
+      }
       break;
     }
 
@@ -1096,7 +1102,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
 
     await logAudit(
       req.user?.id ?? null,
-      'VENDOR_RETRY_CREATE_SUCCESS',
+      recoveredExisting ? 'VENDOR_RETRY_CREATE_RECOVERED_EXISTING' : 'VENDOR_RETRY_CREATE_SUCCESS',
       { playerId, gameName, accountId: finalAccountId },
       { passwordSet: pwdResult.success, attemptedIds },
       getClientIp(req) || null
@@ -1104,7 +1110,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
 
     sendSuccess(res, 'Code1', {
       gameAccount: { gameName, accountId: finalAccountId, password, provisioningStatus: 'CREATED', attemptedIds },
-      idempotent: false,
+      idempotent: recoveredExisting,
       passwordSet: pwdResult.success,
     });
   } catch (error: any) {
