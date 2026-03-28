@@ -46,20 +46,32 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       throw new Error('Game vendor configuration not found');
     }
 
-    const { apiUrl, appId, signatureKey } = vendorConfig as Record<string, string>;
+    const cfg = vendorConfig as Record<string, any>;
+    const getValue = (key: string) => {
+      if (key in cfg) return cfg[key];
+      const lower = key.toLowerCase();
+      for (const k of Object.keys(cfg)) {
+        if (k.toLowerCase() === lower) return cfg[k];
+      }
+      return undefined;
+    };
+    const apiUrl = getValue('apiUrl');
+    const appId = getValue('appId');
+    const signatureKey = getValue('signatureKey');
 
     if (!apiUrl || !appId || !signatureKey) {
       throw new Error('Missing required Joker configuration (apiUrl, appId, signatureKey)');
     }
 
     // Decrypt signature key if it's encrypted
-    const decryptedSignatureKey = isEncrypted(signatureKey)
+    const signatureKeyStr = String(signatureKey);
+    const decryptedSignatureKey = isEncrypted(signatureKeyStr)
       ? decrypt(signatureKey)
-      : signatureKey;
+      : signatureKeyStr;
 
     const config: JokerConfig = {
-      apiUrl,
-      appId,
+      apiUrl: String(apiUrl),
+      appId: String(appId),
       signatureKey: decryptedSignatureKey,
     };
 
