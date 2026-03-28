@@ -5,6 +5,8 @@ import path from 'path';
 import multer from 'multer';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
+import { sendSuccess, sendError } from '../utils/response';
+import { uploadRateLimit } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -38,7 +40,8 @@ router.post('/geolocation',
       const { ips } = req.body;
 
       if (!Array.isArray(ips) || ips.length === 0) {
-        return res.status(400).json({ message: 'Invalid IP addresses' });
+        sendError(res, 'Code321', 400);
+        return;
       }
 
       // Validate IP format
@@ -50,7 +53,8 @@ router.post('/geolocation',
       });
 
       if (validIps.length === 0) {
-        return res.json([]);
+        sendSuccess(res, 'Code1', []);
+        return;
       }
 
       // Filter out private IPs
@@ -70,7 +74,8 @@ router.post('/geolocation',
       );
 
       if (publicIps.length === 0) {
-        return res.json([]);
+        sendSuccess(res, 'Code1', []);
+        return;
       }
 
       // Prepare request for ip-api.com batch endpoint
@@ -89,7 +94,8 @@ router.post('/geolocation',
       });
 
       if (!response.ok) {
-        return res.status(500).json({ message: 'Failed to fetch IP geolocation data' });
+        sendError(res, 'Code322', 500);
+        return;
       }
 
       const results = await response.json();
@@ -129,9 +135,9 @@ router.post('/geolocation',
         };
       });
 
-      res.json(finalResults);
+      sendSuccess(res, 'Code1', finalResults);
     } catch (error) {
-      res.status(500).json({ message: 'Internal server error' });
+      sendError(res, 'Code603', 500);
     }
   }
 );
@@ -140,18 +146,19 @@ router.post(
   '/upload-image',
   authenticateToken,
   requirePermission('action:marketing_manage'),
+  uploadRateLimit,
   upload.single('file'),
   async (req: AuthRequest, res) => {
     try {
       const file = (req as any).file as Express.Multer.File | undefined;
       if (!file) {
-        res.status(400).json({ message: 'No file uploaded' });
+        sendError(res, 'Code323', 400);
         return;
       }
 
       const ext = getImageExt(file.mimetype);
       if (!ext) {
-        res.status(400).json({ message: 'Unsupported image type' });
+        sendError(res, 'Code324', 400);
         return;
       }
 
@@ -166,9 +173,9 @@ router.post(
 
       const base = getPublicBaseUrl(req);
       const url = `${base}/uploads/landing-images/${ym}/${filename}`;
-      res.json({ url });
+      sendSuccess(res, 'Code1', { url });
     } catch {
-      res.status(500).json({ message: 'Upload failed' });
+      sendError(res, 'Code325', 500);
     }
   }
 );

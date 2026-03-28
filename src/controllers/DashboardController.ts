@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { BankAccount, Player, Transaction, User, Game, BankCatalog } from '../models';
 import { getCache, setCache } from '../services/CacheService';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendSuccess, sendError } from '../utils/response';
 
 export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
   try {
@@ -13,7 +14,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
 
     const cached = getCache(cacheKey);
     if (cached) {
-      return res.json(cached);
+      return sendSuccess(res, 'Code1', cached);
     }
 
     const now = new Date();
@@ -401,8 +402,8 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     };
 
     setCache(cacheKey, summary, 30);
-    res.json(summary);
+    sendSuccess(res, 'Code1', summary);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to load dashboard summary' });
+    sendError(res, 'Code424', 500); // Failed to load dashboard summary
   }
 };

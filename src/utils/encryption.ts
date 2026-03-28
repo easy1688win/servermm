@@ -36,7 +36,6 @@ export const encrypt = (text: string): string => {
     encrypted += cipher.final(ENCODING);
     return `${iv.toString(ENCODING)}:${encrypted}`;
   } catch (error) {
-    console.error('Encryption error:', error);
     return text; // Fallback to original text if encryption fails (should not happen)
   }
 };
@@ -61,7 +60,6 @@ export const decrypt = (text: string): string => {
   } catch (error) {
     // If decryption fails (e.g. wrong key or invalid data), return original
     // This might be dangerous if we display encrypted data, but safer than crashing
-    // console.error('Decryption error:', error);
     return text;
   }
 };

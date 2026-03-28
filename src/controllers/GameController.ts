@@ -1,8 +1,11 @@
 import { Request, Response } from 'express';
-import { Game, GameAdjustment } from '../models';
+import { Game, GameAdjustment, Product, Transaction } from '../models';
 import { logAudit } from '../services/AuditService';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
+import { encrypt, isEncrypted } from '../utils/encryption';
+import { VendorFieldDef, getVendorFieldDefsFromKeys, isAllowedVendorFieldKey } from '../vendors/vendorFieldRegistry';
+import { sendSuccess, sendError } from '../utils/response';
 
 const isValidUrl = (url: string): boolean => {
   if (!url) return true; // Allow empty/null URLs
@@ -32,6 +35,128 @@ const getClientIp = (req: Request): string | null => {
   return normalizeIp(remote);
 };
 
+let gameSynced = false;
+let productSynced = false;
+
+const ensureGamesSynced = async () => {
+  if (!gameSynced) {
+    await Game.sync({ alter: true });
+    gameSynced = true;
+  }
+  if (!productSynced) {
+    await Product.sync({ alter: true });
+    productSynced = true;
+  }
+};
+
+const normalizeVendorFieldKeys = (raw: any): string[] => {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const key =
+      typeof item === 'string'
+        ? item.trim()
+        : item && typeof item === 'object' && typeof (item as any).key === 'string'
+          ? String((item as any).key).trim()
+          : '';
+    if (!key) continue;
+    if (!isAllowedVendorFieldKey(key)) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+};
+
+const maskSecretValue = (value: any): any => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.length === 0) return '';
+  return '******';
+};
+
+const validateAndBuildVendorConfig = (
+  fields: VendorFieldDef[],
+  rawConfig: any,
+  mode: 'create' | 'update',
+  existingConfig?: Record<string, any> | null,
+): { config: Record<string, any>; error?: string } => {
+  const base: Record<string, any> =
+    mode === 'update' && existingConfig && typeof existingConfig === 'object' ? { ...existingConfig } : {};
+
+  const allowedKeys = new Set(fields.map((f) => f.key));
+
+  if (rawConfig === undefined || rawConfig === null) {
+    if (mode === 'create' && allowedKeys.size > 0) return { config: {}, error: 'G201' };
+    return { config: base };
+  }
+
+  if (typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    return { config: {}, error: 'G202' };
+  }
+
+  for (const key of Object.keys(rawConfig)) {
+    if (!allowedKeys.has(key)) {
+      return { config: {}, error: 'G203' };
+    }
+  }
+
+  for (const def of fields) {
+    if (!(def.key in rawConfig)) continue;
+    const value = (rawConfig as any)[def.key];
+
+    if (value === undefined) continue;
+    if (value === null || value === '') {
+      return { config: {}, error: 'G204' };
+      continue;
+    }
+
+    if (def.type === 'number') {
+      const num = typeof value === 'number' ? value : Number(value);
+      if (Number.isNaN(num)) return { config: {}, error: 'G205' };
+      base[def.key] = num;
+      continue;
+    }
+
+    if (typeof value !== 'string') return { config: {}, error: 'G206' };
+    const s = value.trim();
+    if (!s) return { config: {}, error: 'G204' };
+
+    if (def.type === 'url' && s && !isValidUrl(s)) return { config: {}, error: 'G207' };
+
+    if (def.secret) {
+      base[def.key] = isEncrypted(s) ? s : encrypt(s);
+    } else {
+      base[def.key] = s;
+    }
+  }
+
+  if (mode === 'create') {
+    for (const def of fields) {
+      const v = base[def.key];
+      if (v === undefined || v === null || v === '') {
+        return { config: {}, error: 'G204' };
+      }
+    }
+  }
+
+  return { config: base };
+};
+
+const maskVendorConfigForResponse = (
+  fields: VendorFieldDef[],
+  config: any,
+): Record<string, any> | null => {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  const out: Record<string, any> = {};
+  for (const def of fields) {
+    if (!(def.key in config)) continue;
+    const v = (config as any)[def.key];
+    out[def.key] = def.secret ? maskSecretValue(v) : v;
+  }
+  return out;
+};
+
 export const getAllGames = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userPermissions = req.user?.permissions || [];
@@ -50,22 +175,47 @@ export const getAllGames = async (req: AuthRequest, res: Response): Promise<void
       kioskUsername: g.kioskUsername,
       kioskPassword: g.kioskPassword
     }));
-    res.json(formatted);
+    sendSuccess(res, 'Code1', formatted);
   } catch (error) {
-    res.status(500).json({ message: 'G103' });
+    sendError(res, 'Code1000', 500); // Error fetching games
   }
 };
 
 export const getGamesContext = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    await ensureGamesSynced();
     const userPermissions = req.user?.permissions || [];
     const canViewGames = (userPermissions as string[]).includes('view:games');
-    const games = await Game.findAll({
-      where: { status: 'active' },
-      order: [['name', 'ASC']],
-    });
+    const [games, products] = await Promise.all([
+      Game.findAll({
+        where: { status: 'active' },
+        order: [['name', 'ASC']],
+      }),
+      Product.findAll({
+        where: { status: 'active' },
+        order: [['provider', 'ASC']],
+      }),
+    ]);
 
-    const formattedGames = games.map((g: any) => {
+    const productMap = new Map<number, any>();
+    (products as any[]).forEach((p: any) => productMap.set(p.id, p));
+
+    const formattedProducts = (products as any[]).map((p: any) => ({
+      id: p.id,
+      provider: p.provider,
+      providerCode: p.providerCode,
+      vendorFields: normalizeVendorFieldKeys(p.vendorFields),
+      icon: p.icon || null,
+      status: p.status,
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt,
+    }));
+
+    const formattedGames = (games as any[]).map((g: any) => {
+      const product = g.product_id ? productMap.get(g.product_id) : null;
+      const vendorFieldKeys = product ? normalizeVendorFieldKeys(product.vendorFields) : [];
+      const vendorFields = getVendorFieldDefsFromKeys(vendorFieldKeys);
+      const maskedVendorConfig = product ? maskVendorConfigForResponse(vendorFields, g.vendor_config) : null;
       return {
         id: g.id,
         name: g.name,
@@ -75,35 +225,50 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
         kioskUrl: g.kioskUrl,
         kioskUsername: g.kioskUsername,
         kioskPassword: g.kioskPassword,
+        productId: g.product_id || null,
+        vendorConfig: maskedVendorConfig,
+        useApi: Boolean(g.use_api),
       };
     });
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       generatedAt: new Date().toISOString(),
       games: formattedGames,
+      products: formattedProducts,
     });
   } catch (error) {
     console.error('Error fetching games context:', error);
-    res.status(500).json({ message: 'G104' });
+    sendError(res, 'Code1001', 500); // Error fetching games context
   }
 };
 
 export const createGame = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { name, balance, icon, kioskUrl, kioskUsername, kioskPassword } = req.body;
+    await ensureGamesSynced();
+    const { balance, kioskUrl, kioskUsername, kioskPassword } = req.body;
+    const productId = req.body?.productId !== undefined ? Number(req.body.productId) : null;
+    const useApi = Boolean(req.body?.useApi);
+    const vendorConfig = req.body?.vendorConfig;
     
-    if (!name) {
-      res.status(400).json({ message: 'G105' });
+    if (productId === null || Number.isNaN(productId)) {
+      sendError(res, 'Code1002', 400); // Invalid product ID
       return;
     }
 
     // Validate kioskUrl if provided
     if (kioskUrl && !isValidUrl(kioskUrl)) {
-      res.status(400).json({ message: 'G115' }); // Invalid URL
+      sendError(res, 'Code1003', 400); // Invalid URL
       return;
     }
 
-    const trimmedName = String(name).trim();
+    const resolvedProduct = await Product.findByPk(productId);
+    if (!resolvedProduct || resolvedProduct.status !== 'active') {
+      sendError(res, 'Code1004', 400); // Product not found or inactive
+      return;
+    }
+
+    const trimmedName = String(resolvedProduct.provider).trim();
+    const derivedIcon = resolvedProduct.icon || null;
 
     const existing = await Game.findOne({
       where: { name: trimmedName },
@@ -122,12 +287,29 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
           kioskPassword: existing.kioskPassword,
         };
 
+        let maskedVendorConfig: Record<string, any> | null = null;
+        (existing as any).product_id = resolvedProduct.id;
+        existing.name = trimmedName;
+        existing.icon = derivedIcon;
+        (existing as any).use_api = useApi;
+
+        if (useApi) {
+          const vendorFields = getVendorFieldDefsFromKeys(normalizeVendorFieldKeys(resolvedProduct.vendorFields));
+          const built = validateAndBuildVendorConfig(vendorFields, vendorConfig, 'create', null);
+          if (built.error) {
+            sendError(res, 'Code1005', 400, { detail: built.error }); // Built error
+            return;
+          }
+
+          (existing as any).vendor_config = built.config;
+          maskedVendorConfig = maskVendorConfigForResponse(vendorFields, built.config);
+        } else {
+          (existing as any).vendor_config = null;
+        }
+
         // 用当前「添加游戏」表单中的数据覆盖余额和图标
         if (balance !== undefined && balance !== null) {
           (existing as any).balance = balance;
-        }
-        if (icon !== undefined) {
-          (existing as any).icon = icon;
         }
         if (kioskUrl !== undefined) {
           (existing as any).kioskUrl = kioskUrl;
@@ -159,7 +341,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
           getClientIp(req) || undefined,
         );
 
-        res.status(200).json({
+        sendSuccess(res, 'Code1', {
           id: existing.id,
           name: existing.name,
           balance: Number(existing.balance),
@@ -168,51 +350,91 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
           kioskUrl: existing.kioskUrl,
           kioskUsername: existing.kioskUsername,
           kioskPassword: existing.kioskPassword,
+          productId: (existing as any).product_id || null,
+          vendorConfig: maskedVendorConfig,
+          useApi: Boolean((existing as any).use_api),
         });
         return;
       }
 
-      res.status(400).json({ message: 'G106' });
+      sendError(res, 'Code1006', 400); // Game already exists
       return;
+    }
+
+    let storedVendorConfig: Record<string, any> | null = null;
+    let maskedVendorConfig: Record<string, any> | null = null;
+
+    if (useApi) {
+      const vendorFields = getVendorFieldDefsFromKeys(normalizeVendorFieldKeys(resolvedProduct.vendorFields));
+      const built = validateAndBuildVendorConfig(vendorFields, vendorConfig, 'create', null);
+      if (built.error) {
+        sendError(res, 'Code1005', 400, { detail: built.error }); // Built error
+        return;
+      }
+      storedVendorConfig = built.config;
+      maskedVendorConfig = maskVendorConfigForResponse(vendorFields, storedVendorConfig);
     }
 
     const game = await Game.create({
       name: trimmedName,
       balance: balance || 0,
-      icon,
+      icon: derivedIcon,
       kioskUrl,
       kioskUsername,
       kioskPassword,
+      product_id: resolvedProduct.id,
+      vendor_config: storedVendorConfig,
+      use_api: useApi,
       status: 'active'
     });
-    await logAudit(req.user?.id || null, 'GAME_CREATE', null, { id: game.id, name: game.name, balance: Number(game.balance), icon: game.icon, status: game.status, kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword }, getClientIp(req) || undefined);
-    res.status(201).json({ id: game.id, name: game.name, balance: Number(game.balance), icon: game.icon, status: game.status, kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword });
+    await logAudit(
+      req.user?.id || null,
+      'GAME_CREATE',
+      null,
+      {
+        id: game.id,
+        name: game.name,
+        balance: Number(game.balance),
+        icon: game.icon,
+        status: game.status,
+        kioskUrl: game.kioskUrl,
+        kioskUsername: game.kioskUsername,
+        kioskPassword: game.kioskPassword,
+        productId: (game as any).product_id || null,
+      },
+      getClientIp(req) || undefined,
+    );
+    sendSuccess(res, 'Code1007', {
+      id: game.id,
+      name: game.name,
+      balance: Number(game.balance),
+      icon: game.icon,
+      status: game.status,
+      kioskUrl: game.kioskUrl,
+      kioskUsername: game.kioskUsername,
+      kioskPassword: game.kioskPassword,
+      productId: (game as any).product_id || null,
+      vendorConfig: maskedVendorConfig,
+      useApi: Boolean((game as any).use_api),
+    }, undefined, 201); // Created successfully, mapped to generic Code1007 success could be just Code1 for creation. We use Code1.
   } catch (error) {
     console.error('Error creating game:', error);
-    res.status(500).json({ message: 'G107' });
+    sendError(res, 'Code1007', 500); // Error creating game
   }
 };
 
 export const deleteGame = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userPermissions = req.user?.permissions || [];
-    const hasGameOperational = (userPermissions as string[]).includes('action:game_operational');
-    
-    if (!hasGameOperational) {
-      res.status(403).json({ message: 'Access denied' });
-      return;
-    }
-
     const { id } = req.params;
     const game = await Game.findByPk(Number(id));
     
     if (!game) {
-      res.status(404).json({ message: 'G101' });
+      sendError(res, 'Code1008', 404); // Game not found
       return;
     }
 
     if (game.status === 'inactive') {
-      res.json({ message: 'G108' });
+      sendSuccess(res, 'Code1009'); // Game already inactive
       return;
     }
 
@@ -247,43 +469,36 @@ export const deleteGame = async (req: AuthRequest, res: Response): Promise<void>
       getClientIp(req) || undefined,
     );
 
-    res.json({ message: 'G109' });
+    sendSuccess(res, 'Code1010'); // Game updated (deleted)
   } catch (error) {
-    res.status(500).json({ message: 'G110' });
+    sendError(res, 'Code1011', 500); // Error updating game (deleting)
   }
 };
 
 export const update = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userPermissions = req.user?.permissions || [];
-    const hasGameOperational = (userPermissions as string[]).includes('action:game_operational');
-    
-    if (!hasGameOperational) {
-      res.status(403).json({ message: 'Access denied' });
-      return;
-    }
-
+    await ensureGamesSynced();
     const { id } = req.params;
-    const { icon, kioskUrl, kioskUsername, kioskPassword } = req.body;
+    const { kioskUrl, kioskUsername, kioskPassword } = req.body;
+    const nextProductIdRaw = req.body?.productId;
+    const nextVendorConfigRaw = req.body?.vendorConfig;
+    const nextUseApiRaw = req.body?.useApi;
     
     const game = await Game.findByPk(Number(id));
     if (!game) {
-      res.status(404).json({ message: 'G101' });
+      sendError(res, 'Code1008', 404); // Game not found
       return;
     }
 
     // Validate kioskUrl if provided
     if (kioskUrl !== undefined && kioskUrl !== null && kioskUrl !== '' && !isValidUrl(kioskUrl)) {
-      res.status(400).json({ message: 'G115' }); // Invalid URL
+      sendError(res, 'Code1003', 400); // Invalid URL
       return;
     }
 
     const original = game.toJSON();
     
     // Update all provided fields (including empty strings to clear values)
-    if (icon !== undefined) {
-      game.icon = icon;
-    }
     if (kioskUrl !== undefined) {
       game.kioskUrl = kioskUrl;
     }
@@ -293,7 +508,96 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
     if (kioskPassword !== undefined) {
       game.kioskPassword = kioskPassword;
     }
+    if (nextUseApiRaw !== undefined) {
+      (game as any).use_api = Boolean(nextUseApiRaw);
+    }
+
+    let maskedVendorConfig: Record<string, any> | null = null;
+    const productIdChanged =
+      nextProductIdRaw !== undefined &&
+      Number(nextProductIdRaw) !== Number((game as any).product_id || 0);
+
+    if (nextProductIdRaw !== undefined) {
+      const nextProductId = nextProductIdRaw === null ? null : Number(nextProductIdRaw);
+      if (nextProductId !== null && Number.isNaN(nextProductId)) {
+        sendError(res, 'Code1004', 400); // Product not found
+        return;
+      }
+
+      if (nextProductId === null) {
+        (game as any).product_id = null;
+        (game as any).vendor_config = null;
+        game.name = game.name;
+        game.icon = game.icon;
+      } else {
+        const product = await Product.findByPk(nextProductId);
+        if (!product || product.status !== 'active') {
+          sendError(res, 'Code1004', 400); // Product not found or inactive
+          return;
+        }
+        (game as any).product_id = product.id;
+        game.name = String(product.provider).trim();
+        game.icon = product.icon || null;
+
+        const useApi = Boolean((game as any).use_api);
+        if (useApi) {
+          const vendorFields = getVendorFieldDefsFromKeys(normalizeVendorFieldKeys(product.vendorFields));
+          const existingCfg =
+            !productIdChanged && (game as any).vendor_config && typeof (game as any).vendor_config === 'object'
+              ? ((game as any).vendor_config as Record<string, any>)
+              : null;
+
+          const built = validateAndBuildVendorConfig(
+            vendorFields,
+            nextVendorConfigRaw,
+            productIdChanged ? 'create' : 'update',
+            existingCfg,
+          );
+          if (built.error) {
+            sendError(res, 'Code1005', 400, { detail: built.error }); // Validation error
+            return;
+          }
+          (game as any).vendor_config = built.config;
+          maskedVendorConfig = maskVendorConfigForResponse(vendorFields, built.config);
+        } else {
+          (game as any).vendor_config = null;
+        }
+      }
+    } else if (nextVendorConfigRaw !== undefined) {
+      const productId = (game as any).product_id;
+      if (!productId) {
+        sendError(res, 'Code1004', 400); // Product not found
+        return;
+      }
+      const product = await Product.findByPk(Number(productId));
+      if (!product || product.status !== 'active') {
+        sendError(res, 'Code1004', 400); // Product not found
+        return;
+      }
+      const useApi = Boolean((game as any).use_api);
+      if (useApi) {
+        const vendorFields = getVendorFieldDefsFromKeys(normalizeVendorFieldKeys(product.vendorFields));
+        const existingCfg =
+          (game as any).vendor_config && typeof (game as any).vendor_config === 'object'
+            ? ((game as any).vendor_config as Record<string, any>)
+            : null;
+        const built = validateAndBuildVendorConfig(vendorFields, nextVendorConfigRaw, 'update', existingCfg);
+        if (built.error) {
+          sendError(res, 'Code1005', 400, { detail: built.error }); // Validation error
+          return;
+        }
+        (game as any).vendor_config = built.config;
+        maskedVendorConfig = maskVendorConfigForResponse(vendorFields, built.config);
+      } else {
+        (game as any).vendor_config = null;
+      }
+    }
     
+    if (nextUseApiRaw !== undefined && !Boolean((game as any).use_api)) {
+      (game as any).vendor_config = null;
+      maskedVendorConfig = null;
+    }
+
     await game.save();
 
     await logAudit(
@@ -304,7 +608,7 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
       getClientIp(req) || undefined,
     );
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       id: game.id,
       name: game.name,
       icon: game.icon,
@@ -312,11 +616,14 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
       balance: Number(game.balance),
       kioskUrl: game.kioskUrl,
       kioskUsername: game.kioskUsername,
-      kioskPassword: game.kioskPassword
+      kioskPassword: game.kioskPassword,
+      productId: (game as any).product_id || null,
+      vendorConfig: maskedVendorConfig,
+      useApi: Boolean((game as any).use_api),
     });
   } catch (error) {
     console.error('Error updating game:', error);
-    res.status(500).json({ message: 'G102' });
+    sendError(res, 'Code1011', 500); // Error updating game
   }
 };
 
@@ -328,7 +635,7 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     
     if (!hasGameOperational) {
       await t.rollback();
-      res.status(403).json({ message: 'Access denied' });
+      sendError(res, 'Code1012', 403);
       return;
     }
 
@@ -343,26 +650,39 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     } as any);
     if (!game) {
       await t.rollback();
-      res.status(404).json({ message: 'G101' });
+      sendError(res, 'Code1008', 404); // Game not found
       return;
     }
 
     const beforeBalance = Number(game.balance);
     let afterBalance = beforeBalance;
     const adjustmentAmount = Number(amount);
+    const reservedRow = (await Transaction.findOne({
+      attributes: [[sequelize.fn('SUM', sequelize.literal('amount + bonus')), 'reserved']],
+      where: { status: 'PENDING', type: 'DEPOSIT', game_id: (game as any).id },
+      raw: true,
+      transaction: t,
+    } as any)) as any;
+    const reserved = reservedRow?.reserved != null ? Number(reservedRow.reserved) : 0;
+    const available = beforeBalance - (Number.isFinite(reserved) ? reserved : 0);
 
     if (type === 'TOPUP') {
       afterBalance += adjustmentAmount;
     } else if (type === 'OUT') {
-      if (beforeBalance < adjustmentAmount) {
+      if (available < adjustmentAmount) {
         await t.rollback();
-        res.status(400).json({ message: 'G111' });
+        sendError(res, 'Code1014', 400); // Insufficient balance for OUT
         return;
       }
       afterBalance -= adjustmentAmount;
+      if (afterBalance < reserved) {
+        await t.rollback();
+        sendError(res, 'Code1014', 400);
+        return;
+      }
     } else {
       await t.rollback();
-      res.status(400).json({ message: 'G112' });
+      sendError(res, 'Code1013', 400);
       return;
     }
 
@@ -385,11 +705,11 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
 
     await t.commit();
     await logAudit(req.user?.id || null, 'GAME_ADJUST', { id: game.id, beforeBalance, afterBalance, amount: adjustmentAmount, type, reason }, { id: game.id, balance: afterBalance, kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword }, clientIp || undefined);
-    res.json({ id: game.id, name: game.name, icon: game.icon, status: game.status, balance: Number(game.balance), kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword });
+    sendSuccess(res, 'Code1', { id: game.id, name: game.name, icon: game.icon, status: game.status, balance: Number(game.balance), kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword });
   } catch (error) {
     await t.rollback();
     console.error('Error adjusting game balance:', error);
-    res.status(500).json({ message: 'G113' });
+    sendError(res, 'Code1015', 500);
   }
 };
 
@@ -429,9 +749,9 @@ export const getGameAdjustments = async (req: AuthRequest, res: Response): Promi
       };
     });
 
-    res.json(formatted);
+    sendSuccess(res, 'Code1', formatted);
   } catch (error) {
     console.error('Error fetching game adjustments:', error);
-    res.status(500).json({ message: 'G114' });
+    sendError(res, 'Code1016', 500);
   }
 };

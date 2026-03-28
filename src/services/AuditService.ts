@@ -166,7 +166,5 @@ export const logAudit = async (
       ip_address: encryptedIp || null,
     });
   } catch (error) {
-    console.error('Failed to create audit log:', error);
-    // Don't throw error to avoid breaking the main flow
   }
 };

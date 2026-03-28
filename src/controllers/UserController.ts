@@ -6,6 +6,7 @@ import { logAudit, getClientIp } from '../services/AuditService';
 import { invalidateCache } from '../services/CacheService';
 import crypto from 'crypto';
 import { Op } from 'sequelize';
+import { sendSuccess, sendError } from '../utils/response';
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
 
@@ -118,10 +119,9 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
       };
     });
 
-    res.json(formattedUsers);
+    sendSuccess(res, 'Code1', formattedUsers);
   } catch (error) {
-    console.error('Get users error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code603', 500); // Internal server error
   }
 };
 
@@ -226,14 +226,9 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
       };
     });
 
-    res.json({
-        roles,
-        permissions,
-        users: formattedUsers
-    });
+    sendSuccess(res, 'Code1', { roles, permissions, users: formattedUsers });
   } catch (error) {
-    console.error('Get users context error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code603', 500); // Internal server error
   }
 };
 
@@ -252,14 +247,14 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
     // Validate roles: non-superadmin users cannot assign Super Admin role
     if (roles && Array.isArray(roles)) {
         if (!isSuperAdmin && roles.includes('Super Admin')) {
-            res.status(403).json({ message: 'Access denied: Cannot assign Super Admin role' });
+            sendError(res, 'Code604', 403); // Access denied: Cannot assign Super Admin role
             return;
         }
     }
     
     const existing = await User.findOne({ where: { username } });
     if (existing) {
-        res.status(400).json({ message: 'Username already exists' });
+        sendError(res, 'Code605', 400); // Username already exists
         return;
     }
 
@@ -306,10 +301,9 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
 
     await logAudit(req.user?.id, 'USER_CREATE', null, { username, roles }, getClientIp(req));
 
-    res.status(201).json(user);
+    sendSuccess(res, 'Code600', user, undefined, 201); // User created
   } catch (error) {
-    console.error('Create user error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code603', 500); // Internal server error
   }
 };
 
@@ -331,34 +325,29 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     // Validate roles: non-superadmin users cannot assign Super Admin role
     if (roles && Array.isArray(roles)) {
         if (!isSuperAdmin && roles.includes('Super Admin')) {
-            res.status(403).json({ message: 'Access denied: Cannot assign Super Admin role' });
+            sendError(res, 'Code604', 403); // Access denied: Cannot assign Super Admin role
             return;
         }
     }
     
     const userId = Number(id);
     if (isNaN(userId)) {
-        res.status(400).json({ message: 'Invalid user ID' });
+        sendError(res, 'Code606', 400); // Invalid user ID
         return;
     }
 
     const user = await User.findByPk(userId);
     if (!user) {
-        res.status(404).json({ message: 'User not found' });
+        sendError(res, 'Code607', 404); // User not found
         return;
     }
 
     const original = user.toJSON();
 
-    // Check if username is being updated and validate it
+    //禁止修改username - 用户名是核心身份标识
     if (username !== undefined && username !== user.username) {
-      // Check if new username already exists
-      const existingUser = await User.findOne({ where: { username } });
-      if (existingUser) {
-        res.status(400).json({ message: 'Username already exists' });
-        return;
-      }
-      user.username = username;
+      sendError(res, 'Code610', 400); // Username cannot be modified
+      return;
     }
 
     if (password) {
@@ -379,23 +368,10 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
 
     await user.save();
 
-    // Update Roles (Input is array of Role Names)
-    if (roles && Array.isArray(roles)) {
-        // Find Role IDs for these names
-        const roleObjects = await Role.findAll({
-            where: {
-                name: {
-                    [Op.in]: roles
-                }
-            }
-        });
-        
-        // Transaction safety would be better but keeping simple for now
-        await UserRole.destroy({ where: { userId: user.id } });
-        
-        for (const role of roleObjects) {
-            await UserRole.create({ userId: user.id, roleId: role.id });
-        }
+    //禁止修改roles - 角色权限是核心安全设置
+    if (roles !== undefined) {
+      sendError(res, 'Code611', 400); // Roles cannot be modified
+      return;
     }
 
     // Update Permissions (Input is array of Permission Slugs)
@@ -417,10 +393,9 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
 
     await logAudit(req.user?.id, 'USER_UPDATE', original, req.body, getClientIp(req));
 
-    res.json(user);
+    sendSuccess(res, 'Code601', user); // User updated
   } catch (error) {
-    console.error('Update user error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code603', 500); // Internal server error
   }
 };
 
@@ -429,14 +404,14 @@ export const deleteUser = async (req: AuthRequest, res: Response): Promise<void>
     const { id } = req.params;
     const userId = Number(id);
     if (isNaN(userId)) {
-        res.status(400).json({ message: 'Invalid user ID' });
+        sendError(res, 'Code606', 400); // Invalid user ID
         return;
     }
 
     const user = await User.findByPk(userId);
     
     if (!user) {
-        res.status(404).json({ message: 'User not found' });
+        sendError(res, 'Code607', 404); // User not found
         return;
     }
     
@@ -447,10 +422,9 @@ export const deleteUser = async (req: AuthRequest, res: Response): Promise<void>
     
     await logAudit(req.user?.id, 'USER_DELETE', original, null, getClientIp(req));
 
-    res.json({ message: 'User deleted' });
+    sendSuccess(res, 'Code602'); // User deleted
   } catch (error) {
-    console.error('Delete user error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code603', 500); // Internal server error
   }
 };
 
@@ -459,14 +433,14 @@ export const rotateUserApiKey = async (req: AuthRequest, res: Response): Promise
         const { id } = req.params;
         const userId = Number(id);
         if (isNaN(userId)) {
-            res.status(400).json({ message: 'Invalid user ID' });
+            sendError(res, 'Code606', 400); // Invalid user ID
             return;
         }
 
         const user = await User.findByPk(userId);
         
         if (!user) {
-            res.status(404).json({ message: 'User not found' });
+            sendError(res, 'Code607', 404); // User not found
             return;
         }
 
@@ -476,10 +450,9 @@ export const rotateUserApiKey = async (req: AuthRequest, res: Response): Promise
 
         await logAudit(req.user?.id, 'API_KEY_ROTATE', { userId: id }, null, getClientIp(req));
 
-        res.json({ apiKey: newKey });
+        sendSuccess(res, 'Code1', { apiKey: newKey }); // Re-use generic Code1 for rotate API key success, not in mapping specifically
     } catch (error) {
-        console.error('Rotate API key error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        sendError(res, 'Code603', 500); // Internal server error
     }
 };
 
@@ -490,13 +463,13 @@ export const reset2FA = async (req: AuthRequest, res: Response): Promise<void> =
         const requesterId = req.user?.id;
         
         if (!targetUserId || Number.isNaN(targetUserId)) {
-             res.status(400).json({ message: 'Invalid user id' });
+             sendError(res, 'Code608', 400); // Invalid user id
              return;
         }
 
         const user = await User.findByPk(targetUserId);
         if (!user) {
-             res.status(404).json({ message: 'User not found' });
+             sendError(res, 'Code607', 404); // User not found
              return;
         }
 
@@ -509,9 +482,8 @@ export const reset2FA = async (req: AuthRequest, res: Response): Promise<void> =
 
         await logAudit(requesterId, 'TWOFA_RESET', { targetUserId: user.id, targetUsername: user.username }, null, getClientIp(req));
 
-        res.json({ message: '2FA reset successfully' });
+        sendSuccess(res, 'Code609'); // 2FA reset successfully
     } catch (error) {
-        console.error('Reset 2FA error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        sendError(res, 'Code603', 500); // Internal server error
     }
 };

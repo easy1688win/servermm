@@ -1,10 +1,13 @@
 import { Request, Response } from 'express';
-import { Player, Game, BankCatalog, Setting, User, PlayerStats } from '../models';
+import { Player, Game, BankCatalog, Setting, User, PlayerStats, Product } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
+import { VendorFactory } from '../services/vendor/VendorFactory';
 import { Op } from 'sequelize';
 import sequelize from '../config/database';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { randomBytes } from 'crypto';
+import { sendSuccess, sendError } from '../utils/response';
 
 const resolveOperatorName = (op: any): string | null => {
   if (!op || typeof op !== 'object') return null;
@@ -62,6 +65,33 @@ const extractGameKeys = (metadata: any): Set<string> => {
     }
   }
   return keys;
+};
+
+const isVendorConflict = (result: any): boolean => {
+  if (!result) return false;
+  const code = typeof result.code === 'string' ? result.code : '';
+  const status = typeof result.status === 'string' ? result.status : '';
+  const msg = typeof result.message === 'string' ? result.message : '';
+  const err = typeof result.error === 'string' ? result.error : '';
+  if (code.toUpperCase() === 'EXISTS') return true;
+  if (status.toLowerCase() === 'exists') return true;
+  const hay = (msg + ' ' + err).toLowerCase();
+  return hay.includes('exist') || hay.includes('already') || hay.includes('duplicate') || hay.includes('conflict');
+};
+
+const randomAlnumUpper = (length: number): string => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const bytes = randomBytes(Math.max(1, length));
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    out += chars[bytes[i] % chars.length];
+  }
+  return out;
+};
+
+const generateConflictAccountId = (base: string): string => {
+  const len = 2 + (randomBytes(1)[0] % 4);
+  return `${base}R${randomAlnumUpper(len)}`;
 };
 
 const validateMetadata = (metadata: any): string | null => {
@@ -261,9 +291,9 @@ export const getPlayers = async (req: AuthRequest, res: Response) => {
       getClientIp(req) || null
     );
 
-    res.json(sanitizedPlayers);
+    sendSuccess(res, 'Code1', sanitizedPlayers);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching players' });
+    sendError(res, 'Code800', 500);
   }
 };
 
@@ -776,7 +806,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       getClientIp(req) || null
     );
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       players: pagedPlayers,
       pagination: {
         page,
@@ -793,8 +823,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       operatorOptions,
     });
   } catch (error) {
-    console.error('Error fetching player list:', error);
-    res.status(500).json({ message: 'Error fetching player list' });
+    sendError(res, 'Code801', 500);
   }
 };
 
@@ -803,22 +832,37 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
     const qRaw = (req.query.q as string | undefined) || '';
     const q = qRaw.trim();
     if (!q) {
-      res.json([]);
+      sendSuccess(res, 'Code1', []);
       return;
     }
 
     const limit = 50;
 
-    const players = await Player.findAll({
+    const include = [{ model: Game, attributes: ['id', 'name'] }];
+
+    const exactPlayer = await Player.findOne({
+      where: { player_game_id: q },
+      include,
+    } as any);
+
+    const playersLike = await Player.findAll({
       where: {
         player_game_id: {
           [Op.like]: `%${q}%`,
         },
       },
-      include: [{ model: Game, attributes: ['id', 'name'] }],
+      include,
       order: [['id', 'DESC']],
       limit,
     } as any);
+
+    const combined = [...playersLike];
+    if (exactPlayer) {
+      const exactId = (exactPlayer as any).id ?? exactPlayer.get?.('id');
+      const exists = combined.some((p: any) => (p.id ?? p.get?.('id')) === exactId);
+      if (!exists) combined.unshift(exactPlayer as any);
+    }
+    const players = combined.slice(0, limit);
 
     const userPermissions = req.user?.permissions || [];
     const sanitizedPlayers = players.map((player: any) =>
@@ -861,10 +905,9 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
       getClientIp(req) || null
     );
 
-    res.json(payload);
+    sendSuccess(res, 'Code1', payload);
   } catch (error: any) {
-    console.error('Error searching players:', error);
-    res.status(500).json({ message: 'Error searching players' });
+    sendError(res, 'Code802', 500);
   }
 };
 
@@ -901,7 +944,6 @@ const generateNextPlayerId = async (): Promise<string> => {
     
     return `${prefix}${paddedNumber}`;
   } catch (error) {
-    console.error('Error generating next player ID:', error);
     // Fallback to starting with 00001
     return `${prefix}00001`;
   }
@@ -910,14 +952,355 @@ const generateNextPlayerId = async (): Promise<string> => {
 export const getNextPlayerId = async (req: AuthRequest, res: Response) => {
   try {
     const nextId = await generateNextPlayerId();
-    res.json({ nextPlayerId: nextId });
+    sendSuccess(res, 'Code1', { nextPlayerId: nextId });
   } catch (error) {
-    console.error('Error getting next player ID:', error);
-    res.status(500).json({ message: 'Error generating next player ID' });
+    sendError(res, 'Code803', 500);
   }
 };
 
-export const createPlayer = async (req: AuthRequest, res: Response) => {
+export const retryCreateGameAccount = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const playerId = Number(req.params.id);
+    if (!Number.isInteger(playerId) || playerId <= 0) {
+      sendError(res, 'Code804', 400);
+      return;
+    }
+
+    const gameNameRaw = (req.body?.gameName as string | undefined) || '';
+    const gameName = gameNameRaw.trim();
+    if (!gameName) {
+      sendError(res, 'Code805', 400);
+      return;
+    }
+
+    const player = await Player.findByPk(playerId);
+    if (!player) {
+      sendError(res, 'Code806', 404);
+      return;
+    }
+
+    const existingMeta: any = (player as any).metadata || {};
+    const existingAccounts: any[] = Array.isArray(existingMeta.gameAccounts) ? existingMeta.gameAccounts : [];
+    const existing = existingAccounts.find((ga) => String(ga?.gameName || '').trim().toLowerCase() === gameName.toLowerCase());
+    if (existing && String(existing.accountId || '').trim() && (existing.provisioningStatus || 'CREATED') === 'CREATED') {
+      sendSuccess(res, 'Code1', { gameAccount: existing, idempotent: true });
+      return;
+    }
+
+    const game = await Game.findOne({
+      where: { name: gameName, status: 'active', use_api: true },
+      include: [{ model: Product, attributes: ['providerCode'] }],
+    } as any);
+    if (!game) {
+      sendError(res, 'Code807', 400);
+      return;
+    }
+
+    const vendor = await VendorFactory.getServiceByProviderCode((game as any).Product.providerCode, (game as any).id);
+    if (!vendor) {
+      sendError(res, 'Code808', 400);
+      return;
+    }
+
+    const baseAccountId = String((player as any).player_game_id || '').trim();
+    const attemptedIds: string[] = [];
+    const candidates = new Set<string>();
+    let finalAccountId = baseAccountId;
+    let result: any = null;
+    let created = false;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const candidate =
+        attempt === 0 ? finalAccountId : (() => {
+          let next = generateConflictAccountId(baseAccountId);
+          let guard = 0;
+          while (candidates.has(next) && guard < 10) {
+            next = generateConflictAccountId(baseAccountId);
+            guard++;
+          }
+          return next;
+        })();
+      candidates.add(candidate);
+      attemptedIds.push(candidate);
+      result = await vendor.createPlayer(candidate);
+      if (result?.success && !isVendorConflict(result)) {
+        finalAccountId = candidate;
+        created = true;
+        break;
+      }
+      if (isVendorConflict(result)) continue;
+      break;
+    }
+
+    if (!created) {
+      if (isVendorConflict(result)) {
+        const nextAccounts = existingAccounts
+          .filter((ga) => String(ga?.gameName || '').trim().toLowerCase() !== gameName.toLowerCase())
+          .concat({
+            gameName,
+            accountId: '',
+            password: undefined,
+            provisioningStatus: 'SKIPPED_CONFLICT',
+            attemptedIds,
+          });
+        (player as any).metadata = { ...existingMeta, gameAccounts: nextAccounts };
+        await player.save();
+        await logAudit(
+          req.user?.id ?? null,
+          'VENDOR_RETRY_CREATE_SKIPPED_CONFLICT',
+          { playerId, gameName },
+          { attemptedIds },
+          getClientIp(req) || null
+        );
+        sendError(res, 'Code809', 409, { attemptedIds });
+        return;
+      }
+      const nextAccounts = existingAccounts
+        .filter((ga) => String(ga?.gameName || '').trim().toLowerCase() !== gameName.toLowerCase())
+        .concat({
+          gameName,
+          accountId: '',
+          password: undefined,
+          provisioningStatus: 'PENDING_RETRY',
+          attemptedIds,
+          error: result?.error || 'PV001',
+        });
+      (player as any).metadata = { ...existingMeta, gameAccounts: nextAccounts };
+      await player.save();
+      await logAudit(
+        req.user?.id ?? null,
+        'VENDOR_RETRY_CREATE_FAILED',
+        { playerId, gameName },
+        { error: result?.error || 'PV001', attemptedIds },
+        getClientIp(req) || null
+      );
+      sendError(res, 'Code809', 400, { detail: result?.error || 'PV001', attemptedIds });
+      return;
+    }
+
+    const FIXED_PASSWORD = 'Abcd12345';
+    const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+    const password = pwdResult.success ? FIXED_PASSWORD : undefined;
+
+    const nextAccounts = existingAccounts
+      .filter((ga) => String(ga?.gameName || '').trim().toLowerCase() !== gameName.toLowerCase())
+      .concat({
+        gameName,
+        accountId: finalAccountId,
+        password,
+        provisioningStatus: 'CREATED',
+        attemptedIds,
+      });
+    (player as any).metadata = { ...existingMeta, gameAccounts: nextAccounts };
+    await player.save();
+
+    await logAudit(
+      req.user?.id ?? null,
+      'VENDOR_RETRY_CREATE_SUCCESS',
+      { playerId, gameName, accountId: finalAccountId },
+      { passwordSet: pwdResult.success, attemptedIds },
+      getClientIp(req) || null
+    );
+
+    sendSuccess(res, 'Code1', {
+      gameAccount: { gameName, accountId: finalAccountId, password, provisioningStatus: 'CREATED', attemptedIds },
+      idempotent: false,
+      passwordSet: pwdResult.success,
+    });
+  } catch (error: any) {
+    sendError(res, 'Code810', 500);
+  }
+};
+
+export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) => {
+  try {
+    const playerId = Number(req.params.id);
+    if (!Number.isInteger(playerId) || playerId <= 0) {
+      sendError(res, 'Code816', 400);
+      return;
+    }
+
+    const player = await Player.findByPk(playerId);
+    if (!player) {
+      sendError(res, 'Code817', 404);
+      return;
+    }
+
+    const existingMeta: any = (player as any).metadata || {};
+    const existingAccounts: any[] = Array.isArray(existingMeta.gameAccounts) ? existingMeta.gameAccounts : [];
+
+    const normalizeGameName = (s: any) => String(s || '').trim().toLowerCase();
+    const existingGameNames = new Set<string>(
+      existingAccounts.map((ga) => normalizeGameName(ga?.gameName)).filter(Boolean),
+    );
+
+    const [activeApiGames, activeNonApiGames] = await Promise.all([
+      Game.findAll({
+        where: { status: 'active', use_api: true },
+        include: [{ model: Product, attributes: ['providerCode'] }],
+      } as any),
+      Game.findAll({
+        where: { status: 'active', use_api: false },
+      } as any),
+    ]);
+
+    const baseAccountId = String((player as any).player_game_id || '').trim();
+    const FIXED_PASSWORD = 'Abcd12345';
+
+    const results: any[] = [];
+    const newAccounts: any[] = [];
+
+    const processGame = async (game: any, useApi: boolean) => {
+      const gameName = String(game?.name || '').trim();
+      const key = normalizeGameName(gameName);
+      if (!key) return;
+
+      if (existingGameNames.has(key)) {
+        results.push({ gameName, use_api: useApi, action: 'SKIP_EXISTS' });
+        return;
+      }
+
+      if (!useApi) {
+        newAccounts.push({
+          gameName,
+          accountId: '',
+          password: undefined,
+          provisioningStatus: 'NON_API',
+        });
+        results.push({ gameName, use_api: false, action: 'NON_API_ADDED' });
+        existingGameNames.add(key);
+        return;
+      }
+
+      const providerCode = (game as any)?.Product?.providerCode;
+      const vendor = typeof providerCode === 'number'
+        ? await VendorFactory.getServiceByProviderCode(providerCode, (game as any).id)
+        : null;
+
+      if (!vendor) {
+        newAccounts.push({
+          gameName,
+          accountId: '',
+          password: undefined,
+          provisioningStatus: 'PENDING_RETRY',
+          error: 'PV013',
+        });
+        results.push({ gameName, use_api: true, action: 'PENDING_RETRY', message: 'Vendor service not available' });
+        existingGameNames.add(key);
+        return;
+      }
+
+      const attemptedIds: string[] = [];
+      const candidates = new Set<string>();
+      let finalAccountId = baseAccountId;
+      let result: any = null;
+      let created = false;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const candidate =
+          attempt === 0 ? finalAccountId : (() => {
+            let next = generateConflictAccountId(baseAccountId);
+            let guard = 0;
+            while (candidates.has(next) && guard < 10) {
+              next = generateConflictAccountId(baseAccountId);
+              guard++;
+            }
+            return next;
+          })();
+        candidates.add(candidate);
+        attemptedIds.push(candidate);
+        result = await vendor.createPlayer(candidate);
+        if (result?.success && !isVendorConflict(result)) {
+          finalAccountId = candidate;
+          created = true;
+          break;
+        }
+        if (isVendorConflict(result)) continue;
+        break;
+      }
+
+      if (!created) {
+        if (isVendorConflict(result)) {
+          newAccounts.push({
+            gameName,
+            accountId: '',
+            password: undefined,
+            provisioningStatus: 'SKIPPED_CONFLICT',
+            attemptedIds,
+          });
+          results.push({ gameName, use_api: true, action: 'SKIPPED_CONFLICT', attemptedIds });
+          existingGameNames.add(key);
+          return;
+        }
+
+        newAccounts.push({
+          gameName,
+          accountId: '',
+          password: undefined,
+          provisioningStatus: 'PENDING_RETRY',
+          attemptedIds,
+          error: result?.error || 'PV001',
+        });
+        results.push({ gameName, use_api: true, action: 'PENDING_RETRY', attemptedIds, message: result?.error || 'PV001' });
+        existingGameNames.add(key);
+        return;
+      }
+
+      const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+      const password = pwdResult.success ? FIXED_PASSWORD : undefined;
+
+      newAccounts.push({
+        gameName,
+        accountId: finalAccountId,
+        password,
+        provisioningStatus: 'CREATED',
+        attemptedIds,
+      });
+      results.push({ gameName, use_api: true, action: 'CREATED', accountId: finalAccountId, attemptedIds, passwordSet: pwdResult.success });
+      existingGameNames.add(key);
+    };
+
+    for (const g of activeApiGames as any[]) {
+      await processGame(g, true);
+    }
+    for (const g of activeNonApiGames as any[]) {
+      await processGame(g, false);
+    }
+
+    if (newAccounts.length === 0) {
+      sendSuccess(res, 'Code1', {
+        updated: false,
+        results,
+        gameAccounts: existingAccounts,
+      });
+      return;
+    }
+
+    (player as any).metadata = {
+      ...existingMeta,
+      gameAccounts: existingAccounts.concat(newAccounts),
+    };
+    await player.save();
+
+    await logAudit(
+      req.user?.id ?? null,
+      'PLAYER_SYNC_ACTIVE_GAME_ACCOUNTS',
+      { playerId },
+      { added: newAccounts.length, results },
+      getClientIp(req) || null,
+    );
+
+    sendSuccess(res, 'Code1', {
+      updated: true,
+      results,
+      gameAccounts: (player as any).metadata?.gameAccounts || [],
+    });
+  } catch (error: any) {
+    sendError(res, 'Code810', 500);
+  }
+};
+
+export const createPlayer = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { player_game_id, game_id, tags, metadata } = req.body;
     const userPermissions = req.user?.permissions || [];
@@ -935,16 +1318,20 @@ export const createPlayer = async (req: AuthRequest, res: Response) => {
       } 
     });
     if (existingPlayer) {
-      return res.status(400).json({ message: 'P101' });
+      sendError(res, 'Code813', 400);
+      return;
     }
     
     const validationError = validateMetadata(metadata);
     if (validationError) {
-      return res.status(400).json({ message: validationError });
+      sendError(res, validationError === 'P105' ? 'Code619' : 'Code620', 400); // Duplicate Bank or Game
+      return;
     }
     const globalError = await validateMetadataGlobalForCreate(metadata);
     if (globalError) {
-      return res.status(400).json({ message: globalError });
+      const codeMap: Record<string, string> = { 'P102': 'Code621', 'P103': 'Code622', 'P110': 'Code623' };
+      sendError(res, codeMap[globalError] || 'Code624', 400); // Global conflict
+      return;
     }
     const canEditPlayerBanks = userPermissions.includes('action:player_banks_edit');
 
@@ -960,11 +1347,267 @@ export const createPlayer = async (req: AuthRequest, res: Response) => {
       createdByUserId: req.user?.id,
     };
 
+    // ─────────────────────────────────────────────
+    // 第一步：先调用供应商API创建玩家（必须全部成功）
+    // ─────────────────────────────────────────────
+    
+    // 1. 获取所有active游戏（包含use_api和非use_api）
+    const allActiveApiGames = await Game.findAll({
+      where: {
+        status: 'active',
+        use_api: true
+      },
+      include: [{ model: Product, attributes: ['providerCode'] }]
+    });
+
+    // 获取所有active但use_api=false的游戏（非API游戏）
+    const allActiveNonApiGames = await Game.findAll({
+      where: {
+        status: 'active',
+        use_api: false
+      }
+    });
+
+    // 合并所有active游戏
+    const allActiveGames = [...allActiveApiGames, ...allActiveNonApiGames];
+
+    // 2. 从metadata获取gameAccounts
+    const gameAccounts = enrichedMetadata?.gameAccounts || [];
+
+    // 3. 构建需要创建的游戏列表（包含gameAccounts中的和遗漏的active游戏）
+    const gamesToCreate: Array<{ gameName: string; accountId: string; game: any }> = [];
+
+    // 首先添加gameAccounts中的游戏（匹配所有active游戏）
+    for (const ga of gameAccounts) {
+      if (!ga.gameName || !ga.accountId) continue;
+      
+      const game = allActiveGames.find(g => g.name === ga.gameName);
+      if (game) {
+        gamesToCreate.push({
+          gameName: ga.gameName,
+          accountId: ga.accountId,
+          game
+        });
+      }
+    }
+
+    // 然后检查是否有遗漏的active API游戏（需要调用供应商API）
+    for (const game of allActiveApiGames) {
+      const alreadyIncluded = gamesToCreate.some(g => g.gameName === game.name);
+      if (!alreadyIncluded) {
+        gamesToCreate.push({
+          gameName: game.name,
+          accountId: finalPlayerId,
+          game
+        });
+      }
+    }
+
+    // 最后添加所有active非API游戏（创建空账号，不需要API调用）
+    for (const game of allActiveNonApiGames) {
+      const alreadyIncluded = gamesToCreate.some(g => g.gameName === game.name);
+      if (!alreadyIncluded) {
+        gamesToCreate.push({
+          gameName: game.name,
+          accountId: '',  // 非API游戏，账号ID为空，需要手动填写
+          game
+        });
+      }
+    }
+
+    const vendorResults: Array<{
+      gameName: string;
+      accountId: string;
+      success: boolean;
+      error?: string;
+      passwordSet?: boolean;
+      password?: string;
+      provisioningStatus: 'CREATED' | 'NON_API' | 'SKIPPED_CONFLICT' | 'PENDING_RETRY';
+      attemptedIds?: string[];
+    }> = [];
+
+    for (const { gameName, accountId, game } of gamesToCreate) {
+      // 非API游戏（use_api=false），直接添加空账号不调用API
+      if (!game.use_api) {
+        vendorResults.push({
+          gameName: gameName,
+          accountId: '',
+          success: true,  // 标记为成功，但不调用API
+          passwordSet: false,
+          password: undefined,
+          provisioningStatus: 'NON_API',
+        });
+        continue;
+      }
+
+      try {
+        // 获取供应商服务
+        const vendor = await VendorFactory.getServiceByProviderCode(
+          (game as any).Product.providerCode,
+          game.id
+        );
+
+        if (!vendor) {
+          vendorResults.push({
+            gameName: gameName,
+            accountId: accountId,
+            success: false,
+            error: 'Vendor service not available',
+            passwordSet: false,
+            password: undefined,
+            provisioningStatus: 'PENDING_RETRY',
+          });
+          continue;
+        }
+
+        const baseAccountId = String(finalPlayerId || '').trim();
+        const attemptedIds: string[] = [];
+        const candidates = new Set<string>();
+        let finalAccountId = String(accountId || baseAccountId).trim();
+        if (!finalAccountId) finalAccountId = baseAccountId;
+        let result: any = null;
+        let created = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const candidate =
+            attempt === 0 ? finalAccountId : (() => {
+              let next = generateConflictAccountId(baseAccountId);
+              let guard = 0;
+              while (candidates.has(next) && guard < 10) {
+                next = generateConflictAccountId(baseAccountId);
+                guard++;
+              }
+              return next;
+            })();
+          candidates.add(candidate);
+          attemptedIds.push(candidate);
+          result = await vendor.createPlayer(candidate);
+          if (result?.success && !isVendorConflict(result)) {
+            finalAccountId = candidate;
+            created = true;
+            break;
+          }
+          if (isVendorConflict(result)) {
+            continue;
+          }
+          break;
+        }
+
+        if (!created) {
+          if (isVendorConflict(result)) {
+            vendorResults.push({
+              gameName: gameName,
+              accountId: '',
+              success: false,
+              error: 'PV006',
+              passwordSet: false,
+              password: undefined,
+              provisioningStatus: 'SKIPPED_CONFLICT',
+              attemptedIds,
+            });
+            continue;
+          }
+          vendorResults.push({
+            gameName: gameName,
+            accountId: '',
+            success: false,
+            error: result?.error || 'PV001',
+            passwordSet: false,
+            password: undefined,
+            provisioningStatus: 'PENDING_RETRY',
+            attemptedIds,
+          });
+          continue;
+        }
+
+        // 如果创建成功，设置固定密码
+        let passwordSet = false;
+        let gamePassword: string | undefined;
+        if (result?.success) {
+          const FIXED_PASSWORD = 'Abcd12345';
+          const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+          passwordSet = pwdResult.success;
+          if (pwdResult.success) {
+            gamePassword = FIXED_PASSWORD;
+          }
+        }
+
+        vendorResults.push({
+          gameName: gameName,
+          accountId: finalAccountId,
+          success: true,
+          error: undefined,
+          passwordSet,
+          password: gamePassword,
+          provisioningStatus: 'CREATED',
+          attemptedIds,
+        });
+
+        // 记录审计日志
+        await logAudit(
+          req.user?.id ?? null,
+          'VENDOR_CREATE_PLAYER',
+          { gameId: game.id, gameName: gameName, username: finalAccountId },
+          { success: true, status: result?.status, message: result?.message },
+          getClientIp(req) || null
+        );
+
+      } catch (err: any) {
+        vendorResults.push({
+          gameName: gameName,
+          accountId: accountId,
+          success: false,
+          error: err.message || 'PV001',
+          passwordSet: false,
+          password: undefined,
+          provisioningStatus: 'PENDING_RETRY',
+        });
+      }
+    }
+
+    const hardFailedResults = vendorResults.filter((r) => !r.success && r.provisioningStatus === 'PENDING_RETRY');
+    if (hardFailedResults.length > 0) {
+      await logAudit(
+        req.user?.id ?? null,
+        'VENDOR_CREATE_FAILED',
+        { playerId: finalPlayerId, reason: 'Hard vendor failure' },
+        { failedGames: hardFailedResults },
+        getClientIp(req) || null
+      );
+    }
+
+    const skippedConflictResults = vendorResults.filter((r) => r.provisioningStatus === 'SKIPPED_CONFLICT');
+    if (skippedConflictResults.length > 0) {
+      await logAudit(
+        req.user?.id ?? null,
+        'VENDOR_CREATE_SKIPPED_CONFLICT',
+        { playerId: finalPlayerId, reason: 'Conflict exhausted' },
+        { skipped: skippedConflictResults },
+        getClientIp(req) || null
+      );
+    }
+
+    const createdGameAccounts = vendorResults.map((r) => ({
+      gameName: r.gameName,
+      accountId: r.accountId,
+      password: r.password,
+      provisioningStatus: r.provisioningStatus,
+      attemptedIds: r.attemptedIds,
+      error: r.success ? undefined : r.error,
+    }));
+
+    const finalMetadata = {
+      ...enrichedMetadata,
+      gameAccounts: createdGameAccounts
+    };
+
+    // ─────────────────────────────────────────────
+    // 第二步：无论供应商成功失败，都创建本地player
+    // ─────────────────────────────────────────────
     const player = await Player.create({
       player_game_id: finalPlayerId,
       game_id: game_id || null,
       tags: tags || [],
-      metadata: enrichedMetadata,
+      metadata: finalMetadata,
       total_in: 0,
       total_out: 0
     });
@@ -972,13 +1615,33 @@ export const createPlayer = async (req: AuthRequest, res: Response) => {
     await logAudit(req.user?.id, 'PLAYER_CREATE', null, player.toJSON(), req.ip);
 
     const responsePayload = sanitizePlayerForResponse(player, userPermissions);
-    res.status(201).json(responsePayload);
+    sendSuccess(res, 'Code1', {
+      ...responsePayload,
+      vendorCreated: vendorResults.some((r) => r.success && r.provisioningStatus === 'CREATED'),
+      gamePasswords: createdGameAccounts
+        .filter((r: any) => r.password)
+        .map((r: any) => ({
+          gameName: r.gameName,
+          username: r.accountId,
+          password: r.password,
+        })),
+      vendorResults: vendorResults.map((r) => ({
+        gameName: r.gameName,
+        success: r.success,
+        passwordSet: r.passwordSet,
+        error: r.success ? undefined : r.error,
+        provisioningStatus: r.provisioningStatus,
+        attemptedIds: r.attemptedIds,
+      })),
+      vendorCreatePending: vendorResults.some((r) => r.provisioningStatus === 'PENDING_RETRY'),
+      vendorCreateSkippedConflict: vendorResults.some((r) => r.provisioningStatus === 'SKIPPED_CONFLICT'),
+    }, undefined, 201);
   } catch (error) {
-    res.status(500).json({ message: 'Error creating player' });
+    sendError(res, 'Code810', 500);
   }
 };
 
-export const updatePlayer = async (req: AuthRequest, res: Response) => {
+export const updatePlayer = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { id } = req.params;
     const { player_game_id, game_id, tags, metadata } = req.body;
@@ -986,28 +1649,35 @@ export const updatePlayer = async (req: AuthRequest, res: Response) => {
     const playerId = Number(id);
 
     if (!Number.isInteger(playerId) || playerId <= 0) {
-      return res.status(400).json({ message: 'P107' });
+      sendError(res, 'Code811', 400);
+      return;
     }
 
     const player = await Player.findByPk(playerId);
     if (!player) {
-        return res.status(404).json({ message: 'P104' });
+        sendError(res, 'Code812', 404);
+        return;
     }
 
     const originalData = player.toJSON();
 
     const canEditPlayerBanks = userPermissions.includes('action:player_banks_edit');
-    let effectiveMetadata = metadata;
-    if (effectiveMetadata && !canEditPlayerBanks && typeof effectiveMetadata === 'object' && Array.isArray((effectiveMetadata as any).playerBanks)) {
-      const cloned = { ...(effectiveMetadata as any) };
+    let incomingMetadata = metadata;
+    if (incomingMetadata && !canEditPlayerBanks && typeof incomingMetadata === 'object' && Array.isArray((incomingMetadata as any).playerBanks)) {
+      const cloned = { ...(incomingMetadata as any) };
       delete cloned.playerBanks;
-      effectiveMetadata = cloned;
+      incomingMetadata = cloned;
     }
+    // Merge metadata to avoid wiping fields (e.g., gameAccounts) when client omits them
+    const effectiveMetadata = incomingMetadata
+      ? { ...(originalData.metadata || {}), ...(incomingMetadata as any) }
+      : undefined;
 
     if (effectiveMetadata) {
       const validationError = validateMetadata(effectiveMetadata);
       if (validationError) {
-        return res.status(400).json({ message: validationError });
+        sendError(res, validationError === 'P105' ? 'Code619' : 'Code620', 400); // Validation error
+        return;
       }
       const globalError = await validateMetadataGlobalForUpdate(
         effectiveMetadata,
@@ -1015,7 +1685,9 @@ export const updatePlayer = async (req: AuthRequest, res: Response) => {
         player.id
       );
       if (globalError) {
-        return res.status(400).json({ message: globalError });
+        const codeMap: Record<string, string> = { 'P102': 'Code621', 'P103': 'Code622', 'P110': 'Code623' };
+        sendError(res, codeMap[globalError] || 'Code624', 400); // Global error
+        return;
       }
     }
     
@@ -1029,25 +1701,26 @@ export const updatePlayer = async (req: AuthRequest, res: Response) => {
 
         const responsePayload = sanitizePlayerForResponse(player, userPermissions);
 
-        res.json(responsePayload);
+        sendSuccess(res, 'Code1', responsePayload);
     } catch (error) {
-        console.error('Error updating player:', error);
-        res.status(500).json({ message: 'P108' });
+        sendError(res, 'Code818', 500);
     }
 };
 
-export const deletePlayer = async (req: AuthRequest, res: Response) => {
+export const deletePlayer = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { id } = req.params;
         const playerId = Number(id);
 
         if (!Number.isInteger(playerId) || playerId <= 0) {
-          return res.status(400).json({ message: 'Invalid player id' });
+          sendError(res, 'Code816', 400);
+          return;
         }
 
         const player = await Player.findByPk(playerId);
         if (!player) {
-            return res.status(404).json({ message: 'Player not found' });
+            sendError(res, 'Code817', 404);
+            return;
         }
 
         const originalData = player.toJSON();
@@ -1055,10 +1728,9 @@ export const deletePlayer = async (req: AuthRequest, res: Response) => {
 
         await logAudit(req.user?.id, 'PLAYER_DELETE', originalData, null, req.ip);
 
-        res.json({ message: 'Player deleted' });
+        sendSuccess(res, 'Code1');
     } catch (error) {
-        console.error('Error deleting player:', error);
-        res.status(500).json({ message: 'Error deleting player' });
+        sendError(res, 'Code819', 500);
     }
 };
 
@@ -1212,7 +1884,7 @@ export const getPlayerStatistics = async (req: AuthRequest, res: Response) => {
             });
         }
 
-        res.json({
+        sendSuccess(res, 'Code1', {
             totalPlayers,
             monthlyNewPlayers,
             todayNewPlayers,
@@ -1227,7 +1899,6 @@ export const getPlayerStatistics = async (req: AuthRequest, res: Response) => {
         });
 
     } catch (error) {
-        console.error('Error fetching player statistics:', error);
-        res.status(500).json({ message: 'Error fetching player statistics' });
+        sendError(res, 'Code815', 500);
     }
 };

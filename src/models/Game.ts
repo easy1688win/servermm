@@ -10,6 +10,9 @@ class Game extends Model {
   public kioskUrl!: string | null;
   public kioskUsername!: string | null;
   public kioskPassword!: string | null;
+  public product_id!: number | null;
+  public vendor_config!: any | null;
+  public use_api!: boolean;
 }
 
 Game.init({
@@ -46,6 +49,19 @@ Game.init({
   kioskPassword: {
     type: DataTypes.STRING,
     allowNull: true,
+  },
+  product_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  vendor_config: {
+    type: DataTypes.JSON,
+    allowNull: true,
+  },
+  use_api: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
   },
 }, {
   sequelize,

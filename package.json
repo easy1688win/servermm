@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -26,15 +26,16 @@
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.0.2",
     "mysql2": "^3.17.0",
     "node-cache": "^5.1.2",
     "otplib": "^13.3.0",
     "qrcode": "^1.5.4",
     "sequelize": "^6.37.7",
     "speakeasy": "^2.0.0",
-    "ua-parser-js": "^2.0.5",
-    "multer": "^2.0.2"
+    "ua-parser-js": "^2.0.5"
   },
   "devDependencies": {
     "@types/archiver": "^7.0.0",

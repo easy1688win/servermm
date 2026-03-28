@@ -18,6 +18,7 @@ import UserDeviceLock from './UserDeviceLock';
 import LandingPage from './LandingPage';
 import LandingPageVisit from './LandingPageVisit';
 import LandingPageEvent from './LandingPageEvent';
+import Product from './Product';
 
 // User - Permission (Direct Many-to-Many - Deprecated but kept for compatibility if needed)
 User.belongsToMany(Permission, { through: UserPermission, foreignKey: 'userId', otherKey: 'permissionId' });
@@ -54,6 +55,10 @@ AuditLog.belongsTo(User, { foreignKey: 'userId', onDelete: 'SET NULL' });
 Game.hasMany(GameAdjustment, { foreignKey: 'game_id' });
 GameAdjustment.belongsTo(Game, { foreignKey: 'game_id' });
 
+// Game - Product (Many-to-One)
+Game.belongsTo(Product, { foreignKey: 'product_id' });
+Product.hasMany(Game, { foreignKey: 'product_id' });
+
 // User - UserSession (One-to-Many)
 User.hasMany(UserSession, { foreignKey: 'user_id' });
 UserSession.belongsTo(User, { foreignKey: 'user_id' });
@@ -89,4 +94,5 @@ export {
   LandingPage,
   LandingPageVisit,
   LandingPageEvent,
+  Product,
 };

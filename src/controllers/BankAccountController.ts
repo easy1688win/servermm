@@ -6,6 +6,7 @@ import { logAudit, getClientIp } from '../services/AuditService';
 import sequelize from '../config/database';
 import { sanitizePlayerForResponse } from './PlayerController';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendSuccess, sendError } from '../utils/response';
 
 const resolveOperatorName = (op: any): string | null => {
   if (!op || typeof op !== 'object') return null;
@@ -74,9 +75,9 @@ export const getBankAccounts = async (req: AuthRequest, res: Response) => {
     const userPermissions = req.user?.permissions || [];
     const sanitizedAccounts = accounts.map((account: any) => sanitizeBankAccountForResponse(account, userPermissions));
 
-    res.json(sanitizedAccounts);
+    sendSuccess(res, 'Code1', sanitizedAccounts);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching bank accounts' });
+    sendError(res, 'Code700', 500);
   }
 };
 
@@ -313,7 +314,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
       icon: c.icon || null,
     }));
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       bankAccounts,
       transactions: shapedTransactions,
       bankCatalog,
@@ -326,7 +327,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('Error fetching bank context', error);
-    res.status(500).json({ message: 'Error fetching bank context' });
+    sendError(res, 'Code701', 500);
   }
 };
 
@@ -337,7 +338,8 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
     let cleaned = typeof account_number === 'string' ? account_number.replace(/\D/g, '') : '';
 
     if (!cleaned || cleaned.length < 4) {
-      return res.status(400).json({ message: 'Account number must contain at least 4 digits' });
+      sendError(res, 'Code702', 400);
+      return;
     }
 
     const allAccounts = await BankAccount.findAll();
@@ -357,7 +359,8 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
       await logAudit(req.user?.id, 'BANK_UPDATE', originalData, existing.toJSON(), getClientIp(req) || undefined);
 
       const userPermissions = req.user?.permissions || [];
-      return res.json(sanitizeBankAccountForResponse(existing, userPermissions));
+      sendSuccess(res, 'Code1', sanitizeBankAccountForResponse(existing, userPermissions));
+      return;
     }
 
     const account = await BankAccount.create({
@@ -371,9 +374,9 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
     await logAudit(req.user?.id, 'BANK_CREATE', null, account.toJSON(), getClientIp(req) || undefined);
 
     const userPermissions = req.user?.permissions || [];
-    res.status(201).json(sanitizeBankAccountForResponse(account, userPermissions));
+    sendSuccess(res, 'Code703', sanitizeBankAccountForResponse(account, userPermissions), undefined, 201);
   } catch (error) {
-    res.status(500).json({ message: 'Error creating bank account' });
+    sendError(res, 'Code704', 500);
   }
 };
 
@@ -384,7 +387,8 @@ export const updateBankAccount = async (req: AuthRequest, res: Response) => {
     const account = await BankAccount.findByPk(Number(id));
     
     if (!account) {
-      return res.status(404).json({ message: 'Bank account not found' });
+      sendError(res, 'Code705', 404);
+      return;
     }
     const originalData = account.toJSON();
     const updates: any = { bank_name, alias, status };
@@ -400,9 +404,9 @@ export const updateBankAccount = async (req: AuthRequest, res: Response) => {
     await logAudit(req.user?.id, 'BANK_UPDATE', originalData, account.toJSON(), getClientIp(req) || undefined);
 
     const userPermissions = req.user?.permissions || [];
-    res.json(sanitizeBankAccountForResponse(account, userPermissions));
+    sendSuccess(res, 'Code1', sanitizeBankAccountForResponse(account, userPermissions));
   } catch (error) {
-    res.status(500).json({ message: 'Error updating bank account' });
+    sendError(res, 'Code706', 500);
   }
 };
 
@@ -412,7 +416,8 @@ export const deleteBankAccount = async (req: AuthRequest, res: Response) => {
     const account = await BankAccount.findByPk(Number(id));
 
     if (!account) {
-      return res.status(404).json({ message: 'Bank account not found' });
+      sendError(res, 'Code705', 404);
+      return;
     }
 
     const originalData = account.toJSON();
@@ -421,10 +426,10 @@ export const deleteBankAccount = async (req: AuthRequest, res: Response) => {
 
     await logAudit(req.user?.id, 'BANK_DELETE', originalData, account.toJSON(), getClientIp(req) || undefined);
 
-    res.json({ message: 'Bank account banned' });
+    sendSuccess(res, 'Code707');
   } catch (error: any) {
     console.error('Error deleting bank account:', error);
-    res.status(500).json({ message: error.message || 'Error deleting bank account' });
+    sendError(res, 'Code708', 500, { detail: error.message });
   }
 };
 
@@ -447,6 +452,23 @@ export const adjustBalance = async (req: AuthRequest, res: Response) => {
     const adjustmentAmount = Number(amount);
     
     const newBalance = originalBalance + adjustmentAmount;
+    if (adjustmentAmount < 0) {
+      const reserved = Number(
+        (await Transaction.sum('amount', {
+          where: {
+            status: 'PENDING',
+            type: 'WITHDRAWAL',
+            bank_account_id: (account as any).id,
+          },
+          transaction: t,
+        } as any)) || 0,
+      );
+      if (newBalance < reserved) {
+        const fmt = (n: number) => `$${Number(n).toFixed(2)}`;
+        const available = originalBalance - reserved;
+        throw new Error(`BALANCE_ERR:T903:Insufficient Funds ${fmt(available)}`);
+      }
+    }
     
     // Update Account
     account.total_balance = newBalance;
@@ -477,11 +499,27 @@ export const adjustBalance = async (req: AuthRequest, res: Response) => {
 
     const userPermissions = req.user?.permissions || [];
     const canViewBalance = userPermissions.includes('view:bank_balance');
-    res.json({ message: 'Balance adjusted', new_balance: canViewBalance ? newBalance : null });
+    sendSuccess(res, 'Code709', { new_balance: canViewBalance ? newBalance : null });
   } catch (error: any) {
     if (!(t as any).finished) await t.rollback();
+    const msg = String(error?.message ?? '');
+    if (msg.startsWith('BALANCE_ERR:')) {
+      const parts = msg.split(':');
+      const code = (parts[1] || 'T900') as string;
+      const detail = parts.slice(2).join(':') || 'Invalid balance';
+      if (code === 'T903') {
+        sendError(res, 'Code309', 400, { detail });
+        return;
+      }
+      if (code === 'T904') {
+        sendError(res, 'Code310', 400, { detail });
+        return;
+      }
+      sendError(res, 'Code308', 400, { detail });
+      return;
+    }
     console.error('Error adjusting balance:', error);
-    res.status(500).json({ message: error.message || 'Error adjusting balance' });
+    sendError(res, 'Code710', 500, { detail: msg });
   }
 };
 
@@ -490,7 +528,8 @@ export const getBankActivity = async (req: AuthRequest, res: Response) => {
     const { id } = req.params;
     const bankId = Number(id);
     if (Number.isNaN(bankId)) {
-      return res.status(400).json({ message: 'Invalid bank account id' });
+      sendError(res, 'Code711', 400);
+      return;
     }
 
     const userPermissions = req.user?.permissions || [];
@@ -563,9 +602,9 @@ export const getBankActivity = async (req: AuthRequest, res: Response) => {
       return json;
     });
 
-    res.json(shaped);
+    sendSuccess(res, 'Code1', shaped);
   } catch (error) {
     console.error('Error fetching bank activity', error);
-    res.status(500).json({ message: 'Error fetching bank activity' });
+    sendError(res, 'Code712', 500);
   }
 };

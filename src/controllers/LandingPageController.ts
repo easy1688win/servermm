@@ -4,6 +4,7 @@ import sequelize from '../config/database';
 import { LandingPage, LandingPageEvent, LandingPageVisit, Setting, User } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendSuccess, sendError } from '../utils/response';
 
 const tryDecryptIp = (cipher: any): string | null => {
   if (typeof cipher !== 'string') return null;
@@ -249,9 +250,9 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
       a.localeCompare(b, undefined, { sensitivity: 'base' })
     );
 
-    res.json({ items, total: result.count, page, pageSize, sourceOptions });
+    sendSuccess(res, 'Code1', { items, total: result.count, page, pageSize, sourceOptions });
   } catch {
-    res.status(500).json({ message: 'LP101' });
+    sendError(res, 'LP101', 500);
   }
 };
 
@@ -259,18 +260,18 @@ export const getLandingPage = async (req: AuthRequest, res: Response): Promise<v
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
-      res.status(400).json({ message: 'LP104' });
+      sendError(res, 'LP104', 400);
       return;
     }
 
     const page = await LandingPage.findByPk(id);
     if (!page) {
-      res.status(404).json({ message: 'LP105' });
+      sendError(res, 'LP105', 404);
       return;
     }
 
     const json: any = (page as any).toJSON ? (page as any).toJSON() : (page as any);
-    res.json({
+    sendSuccess(res, 'Code1', {
       id: json.id,
       name: json.name,
       page_url: json.page_url,
@@ -287,7 +288,7 @@ export const getLandingPage = async (req: AuthRequest, res: Response): Promise<v
       updated_at: json.updated_at,
     });
   } catch {
-    res.status(500).json({ message: 'LP110' });
+    sendError(res, 'LP110', 500);
   }
 };
 
@@ -310,12 +311,12 @@ export const createLandingPage = async (req: AuthRequest, res: Response): Promis
     const secondary_cta_url = typeof req.body?.secondary_cta_url === 'string' ? req.body.secondary_cta_url.trim() : null;
 
     if (!name || !pageUrl) {
-      res.status(400).json({ message: 'LP102' });
+      sendError(res, 'LP102', 400);
       return;
     }
 
     if (!isValidHttpUrl(pageUrl)) {
-      res.status(400).json({ message: 'LP109' });
+      sendError(res, 'LP109', 400);
       return;
     }
 
@@ -337,9 +338,9 @@ export const createLandingPage = async (req: AuthRequest, res: Response): Promis
       secondary_cta_url: secondary_cta_url && secondary_cta_url.length > 0 ? secondary_cta_url.slice(0, 2048) : null,
     } as any);
 
-    res.json(created);
+    sendSuccess(res, 'Code1', created, undefined, 201);
   } catch {
-    res.status(500).json({ message: 'LP103' });
+    sendError(res, 'LP103', 500);
   }
 };
 
@@ -347,13 +348,13 @@ export const updateLandingPage = async (req: AuthRequest, res: Response): Promis
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
-      res.status(400).json({ message: 'LP104' });
+      sendError(res, 'LP104', 400);
       return;
     }
 
     const page = await LandingPage.findByPk(id);
     if (!page) {
-      res.status(404).json({ message: 'LP105' });
+      sendError(res, 'LP105', 404);
       return;
     }
 
@@ -363,7 +364,7 @@ export const updateLandingPage = async (req: AuthRequest, res: Response): Promis
     if (typeof req.body?.page_url === 'string') {
       const next = req.body.page_url.trim();
       if (!isValidHttpUrl(next)) {
-        res.status(400).json({ message: 'LP109' });
+        sendError(res, 'LP109', 400);
         return;
       }
       page.page_url = next;
@@ -418,9 +419,9 @@ export const updateLandingPage = async (req: AuthRequest, res: Response): Promis
     page.operator_id = operatorId;
 
     await page.save();
-    res.json(page);
+    sendSuccess(res, 'Code1', page);
   } catch {
-    res.status(500).json({ message: 'LP106' });
+    sendError(res, 'LP106', 500);
   }
 };
 
@@ -428,13 +429,13 @@ export const deleteLandingPage = async (req: AuthRequest, res: Response): Promis
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
-      res.status(400).json({ message: 'LP107' });
+      sendError(res, 'LP107', 400);
       return;
     }
 
     const page = await LandingPage.findByPk(id);
     if (!page) {
-      res.status(404).json({ message: 'LP105' });
+      sendError(res, 'LP105', 404);
       return;
     }
 
@@ -443,9 +444,9 @@ export const deleteLandingPage = async (req: AuthRequest, res: Response): Promis
       await LandingPageEvent.destroy({ where: { landing_page_id: id }, transaction: t } as any);
       await page.destroy({ transaction: t } as any);
     });
-    res.json({ ok: true });
+    sendSuccess(res, 'Code1', { ok: true });
   } catch {
-    res.status(500).json({ message: 'LP108' });
+    sendError(res, 'LP108', 500);
   }
 };
 
@@ -453,7 +454,7 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
-      res.status(400).json({ message: 'LP104' });
+      sendError(res, 'LP104', 400);
       return;
     }
 
@@ -574,7 +575,7 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
       .slice(0, 20)
       .map(([referrer, count]) => ({ referrer, count }));
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       pv,
       uv,
       clicks,
@@ -589,7 +590,7 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
         .filter((r: any) => Boolean(r.ip) && r.ip !== '-'),
     });
   } catch {
-    res.status(500).json({ message: 'LP201' });
+    sendError(res, 'LP201', 500);
   }
 };
 
@@ -597,7 +598,7 @@ export const getLandingVisitDetails = async (req: AuthRequest, res: Response): P
   try {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
-      res.status(400).json({ message: 'LP104' });
+      sendError(res, 'LP104', 400);
       return;
     }
 
@@ -651,8 +652,8 @@ export const getLandingVisitDetails = async (req: AuthRequest, res: Response): P
       };
     });
 
-    res.json({ total: count, limit, offset, items });
+    sendSuccess(res, 'Code1', { total: count, limit, offset, items });
   } catch {
-    res.status(500).json({ message: 'LP301' });
+    sendError(res, 'LP301', 500);
   }
 };

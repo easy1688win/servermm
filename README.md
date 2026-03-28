@@ -86,3 +86,13 @@ RUN npm run build
 EXPOSE 5000
 CMD ["npm", "start"]
 ```
+cd /path/to/servermm/backend
+git fetch origin
+git reset --hard origin/main
+git clean -fd
+
+npm ci
+npm run build   # 会自动 bump patch 版本 + tsc
+
+pm2 restart backend
+# 或 sudo systemctl restart backend

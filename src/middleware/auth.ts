@@ -5,6 +5,7 @@ import { getCache, setCache } from '../services/CacheService';
 import { User, Role, Permission } from '../models';
 import UserSession from '../models/UserSession';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
+import { sendError } from '../utils/response';
 
 dotenv.config();
 
@@ -21,7 +22,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
   let token = req.cookies?._T || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
   if (!token) {
-    return res.status(401).json({ message: 'API Access Denied.' });
+    sendError(res, 'Code101', 401);
+    return;
   }
 
   if (isEncrypted(token)) {
@@ -30,7 +32,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
 
   jwt.verify(token, secret, async (err: any, decoded: any) => {
     if (err) {
-      return res.status(401).json({ message: 'Invalid or expired token' });
+      sendError(res, 'Code103', 401);
+      return;
     }
 
     const userId = decoded.id;
@@ -48,10 +51,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       });
 
       if (!session || session.revoked_at) {
-        return res.status(401).json({
-          code: 'SESSION_REVOKED',
-          message: 'Your session is no longer active. Please log in again.',
-        });
+        sendError(res, 'Code111', 401);
+        return;
       }
 
       // Token Blacklist Check
@@ -70,17 +71,15 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
          session.revoked_reason = 'TOKEN_THEFT_DETECTED';
          await session.save();
 
-         return res.status(401).json({
-            code: 'INVALID_DEVICE',
-            message: 'Security Alert: Token theft detected. Session terminated.',
-         });
+         sendError(res, 'Code110', 401);
+         return;
       }
 
       try {
         session.last_active_at = new Date();
         await session.save();
       } catch (e) {
-        console.error('Failed to update session last_active_at', e);
+        // Session update failed, but continue
       }
     }
 
@@ -94,23 +93,24 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       if (cachedPermissions) {
         user = await User.findByPk(userId);
         if (!user) {
-          return res.status(401).json({ message: 'User not found' });
+          sendError(res, 'Code104', 401);
+          return;
         }
         
         // Token Version Check: If password was changed, token version increments
         // If token version is undefined (old tokens) or mismatch, revoke
         if (tokenVersion !== undefined && user.token_version !== tokenVersion) {
-           return res.status(401).json({ 
-             code: 'TOKEN_EXPIRED',
-             message: 'Security update: Please log in again.' 
-           });
+           sendError(res, 'Code112', 401);
+           return;
         }
 
         if (user.status === 'locked') {
-          return res.status(403).json({ message: 'Account is locked' });
+          sendError(res, 'Code105', 403);
+          return;
         }
         if (!user.api_key) {
-          return res.status(403).json({ message: 'API key missing for user' });
+          sendError(res, 'Code109', 403);
+          return;
         }
 
         // Verify API Key matches (except for get-us profile fetch)
@@ -121,7 +121,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
           // Compare the encrypted key from header with the encrypted key in DB.
           // We do not need to decrypt them to check for equality.
           if (!clientKey || clientKey !== user.api_key) {
-             return res.status(403).json({ message: 'Invalid or missing API Key (x-ap)' });
+             sendError(res, 'Code108', 403);
+             return;
           }
         }
         
@@ -138,22 +139,23 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
         });
 
         if (!user) {
-          return res.status(401).json({ message: 'User not found' });
+          sendError(res, 'Code104', 401);
+          return;
         }
 
         // Token Version Check
         if (tokenVersion !== undefined && user.token_version !== tokenVersion) {
-           return res.status(401).json({ 
-             code: 'TOKEN_EXPIRED',
-             message: 'Security update: Please log in again.' 
-           });
+           sendError(res, 'Code112', 401);
+           return;
         }
 
         if (user.status === 'locked') {
-          return res.status(403).json({ message: 'Account is locked' });
+          sendError(res, 'Code105', 403);
+          return;
         }
         if (!user.api_key) {
-          return res.status(403).json({ message: 'API key missing for user' });
+          sendError(res, 'Code109', 403);
+          return;
         }
 
         // Verify API Key matches (except for get-us profile fetch)
@@ -163,7 +165,8 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
 
           // Compare the encrypted key from header with the encrypted key in DB.
           if (!clientKey || clientKey !== user.api_key) {
-             return res.status(403).json({ message: 'Invalid or missing API Key (x-ap)' });
+             sendError(res, 'Code108', 403);
+             return;
           }
         }
 
@@ -188,7 +191,6 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       };
       next();
     } catch (dbError) {
-      console.error('Error fetching user permissions:', dbError);
       req.user = { id: decoded.id, username: decoded.username, permissions: [] };
       return next();
     }

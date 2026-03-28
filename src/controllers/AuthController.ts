@@ -13,6 +13,7 @@ import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { setCache, getCache, invalidateCache } from '../services/CacheService';
+import { sendSuccess, sendError, sendWarning } from '../utils/response';
 
 const secret = process.env.JWT_SECRET;
 if (!secret) {
@@ -476,8 +477,7 @@ const finalizeLogin = async (user: any, req: Request, res: Response, deviceId: s
       maxAge: maxAge 
     });
 
-    res.json({ 
-      success: true,
+    sendSuccess(res, 'Code1', {
       t: encryptedToken,
       user: {
         id: user.id,
@@ -551,10 +551,7 @@ const isAllowedDuringMaintenance = (settings: MaintenanceGateSettings, roleNames
 };
 
 const denyMaintenance = (res: Response, settings: MaintenanceGateSettings) => {
-  res.status(503).json({
-    code: 'MAINTENANCE_MODE',
-    data: settings,
-  });
+  sendWarning(res, 'api.systemIsUnderMaintenance', settings, undefined, 503);
 };
 
 export const login = async (req: Request, res: Response): Promise<void> => {
@@ -580,7 +577,6 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
       if (state.tempLockUntil && now < state.tempLockUntil) {
         const remainingSeconds = Math.ceil((state.tempLockUntil - now) / 1000);
-        const message = `Too many failed attempts. Please try again in ${remainingSeconds}s.`;
         await logAudit(
           null,
           'LOGIN_BLOCKED',
@@ -588,7 +584,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
           null,
           clientIp || undefined
         );
-        res.status(429).json({ message, lockoutUntil: state.tempLockUntil });
+        sendWarning(res, 'Code204', { lockoutUntil: state.tempLockUntil }, { seconds: remainingSeconds }, 429);
         return;
       } else if (state.tempLockUntil && now >= state.tempLockUntil) {
         state.tempLockUntil = undefined;
@@ -606,20 +602,20 @@ export const login = async (req: Request, res: Response): Promise<void> => {
           null,
           clientIp || undefined
         );
-        res.status(429).json({ message: 'Too many failed attempts. Please try again in 30s.', lockoutUntil: state.tempLockUntil });
+        sendWarning(res, 'Code203', { lockoutUntil: state.tempLockUntil }, { seconds: 30 }, 429);
         return;
       }
 
       unknownUserAttempts.set(key, state);
 
       await logAudit(null, 'LOGIN_FAILED', { username, reason: 'User not found', failures: state.failures }, null, clientIp || undefined);
-      res.status(401).json({ message: 'User not found' });
+      sendError(res, 'Code200', 401);
       return;
     }
 
     if (user.status === 'locked') {
       await logAudit(user.id, 'LOGIN_BLOCKED', { reason: 'Account locked' }, null, clientIp || undefined);
-      res.status(403).json({ message: 'Account is locked' });
+      sendError(res, 'Code105', 403);
       return;
     }
 
@@ -628,9 +624,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
     if (state.tempLockUntil && now < state.tempLockUntil) {
       const remainingSeconds = Math.ceil((state.tempLockUntil - now) / 1000);
-      const message = `Too many failed attempts. Please try again in ${remainingSeconds}s.`;
       await logAudit(user.id, 'LOGIN_BLOCKED', { username, reason: 'Temporary lockout', remainingSeconds }, null, clientIp || undefined);
-      res.status(429).json({ message, lockoutUntil: state.tempLockUntil });
+      sendWarning(res, 'Code204', { lockoutUntil: state.tempLockUntil }, { seconds: remainingSeconds }, 429);
       return;
     } else if (state.tempLockUntil && now >= state.tempLockUntil) {
       state.tempLockUntil = undefined;
@@ -645,7 +640,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         await user.save();
         loginAttemptsByUser.delete(user.id);
         await logAudit(user.id, 'LOGIN_BLOCKED', { username, reason: 'Too many failed attempts; account locked', failures: state.failures }, null, clientIp || undefined);
-        res.status(403).json({ message: 'Account is locked' });
+        sendError(res, 'Code205', 403);
         return;
       }
 
@@ -659,13 +654,13 @@ export const login = async (req: Request, res: Response): Promise<void> => {
           null,
           clientIp || undefined
         );
-        res.status(429).json({ message: 'Too many failed attempts. Please try again in 30s.', lockoutUntil: state.tempLockUntil });
+        sendWarning(res, 'Code203', { lockoutUntil: state.tempLockUntil }, { seconds: 30 }, 429);
         return;
       }
 
       loginAttemptsByUser.set(user.id, state);
       await logAudit(user.id, 'LOGIN_FAILED', { username, reason: 'Invalid password', failures: state.failures }, null, clientIp || undefined);
-      res.status(401).json({ message: 'Invalid password' });
+      sendError(res, 'Code201', 401);
       return;
     }
 
@@ -690,7 +685,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         null,
         clientIp || undefined
       );
-      res.status(403).json({ message: 'API key not provisioned for this account' });
+      sendError(res, 'Code106', 403);
       return;
     }
 
@@ -714,7 +709,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         null,
         clientIp || undefined
       );
-      res.status(403).json({ message: 'This device is locked for this account' });
+      sendError(res, 'Code107', 403);
       return;
     }
 
@@ -733,14 +728,14 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       { expiresIn: '10m' }
     );
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       require2fa: true,
       setupRequired: isSetupRequired,
       token: preAuthToken
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code2', 500);
   }
 };
 
@@ -748,7 +743,7 @@ export const setup2FA = async (req: Request, res: Response): Promise<void> => {
     try {
         const { token } = req.body;
         if (!token) {
-             res.status(400).json({ message: 'Token is required' });
+             sendError(res, 'Code207', 400);
              return;
         }
 
@@ -756,12 +751,12 @@ export const setup2FA = async (req: Request, res: Response): Promise<void> => {
         try {
             decoded = jwt.verify(token, PRE_AUTH_SECRET);
         } catch (e) {
-             res.status(401).json({ message: 'Invalid or expired token' });
+             sendError(res, 'Code208', 401);
              return;
         }
 
         if (decoded.stage !== '2fa_setup') {
-             res.status(400).json({ message: 'Invalid stage for setup' });
+             sendError(res, 'Code209', 400);
              return;
         }
 
@@ -778,21 +773,21 @@ export const setup2FA = async (req: Request, res: Response): Promise<void> => {
         }
         const displayName = user?.full_name || decoded.username || 'User';
 
-        const secret = speakeasy.generateSecret({ length: 20, name: `AIPlatform (${displayName})` });
+        const secret = speakeasy.generateSecret({ length: 20, name: `SparkX (${displayName})` });
         
         // Store secret in cache for verification step (10 mins)
         setCache(`2fa_setup_secret:${decoded.id}`, secret.base32, 600);
 
         const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url || '');
 
-        res.json({
+        sendSuccess(res, 'Code1', {
             secret: secret.base32,
             qrCode: qrCodeUrl
         });
 
     } catch (error) {
         console.error('Setup 2FA error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        sendError(res, 'Code2', 500);
     }
 };
 
@@ -802,7 +797,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
         const clientIp = getClientIp(req);
 
         if (!token || !code) {
-             res.status(400).json({ message: 'Token and code are required' });
+             sendError(res, 'Code210', 400);
              return;
         }
 
@@ -810,7 +805,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
         try {
             decoded = jwt.verify(token, PRE_AUTH_SECRET);
         } catch (e) {
-             res.status(401).json({ message: 'Invalid or expired token' });
+             sendError(res, 'Code208', 401);
              return;
         }
 
@@ -826,7 +821,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
         });
 
         if (!user) {
-             res.status(404).json({ message: 'User not found' });
+             sendError(res, 'Code200', 404);
              return;
         }
 
@@ -843,7 +838,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
              // Verify against cached secret
              const cachedSecret = getCache(`2fa_setup_secret:${user.id}`);
              if (!cachedSecret) {
-                 res.status(400).json({ message: 'Setup session expired. Please login again.' });
+                 sendError(res, 'Code212', 400);
                  return;
              }
 
@@ -855,7 +850,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
 
              if (!verified) {
                 await logAudit(user.id, 'TWOFA_VERIFY_FAILED', null, null, clientIp || undefined);
-                res.status(401).json({ message: 'Invalid code' });
+                sendError(res, 'Code213', 401);
                 return;
              }
 
@@ -871,7 +866,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
         } else if (decoded.stage === '2fa_verify') {
              if (!user.two_factor_enabled || !user.two_factor_secret) {
                  // Should not happen if logic is correct, but safe fallback
-                 res.status(400).json({ message: '2FA not enabled for this user' });
+                 sendError(res, 'Code214', 400);
                  return;
              }
 
@@ -884,11 +879,11 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
 
              if (!verified) {
                  await logAudit(user.id, 'TWOFA_VERIFY_FAILED', null, null, clientIp || undefined);
-                 res.status(401).json({ message: 'Invalid code' });
+                 sendError(res, 'Code213', 401);
                  return;
              }
         } else {
-             res.status(400).json({ message: 'Invalid stage' });
+             sendError(res, 'Code215', 400);
              return;
         }
 
@@ -897,7 +892,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
 
     } catch (error) {
         console.error('Verify 2FA error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        sendError(res, 'Code2', 500);
     }
 };
 
@@ -951,10 +946,10 @@ export const logout = async (req: Request, res: Response): Promise<void> => {
     }
 
     res.clearCookie('_T');
-    res.status(200).json({ message: 'Logged out successfully' });
+    sendSuccess(res, 'Code216'); // Logged out successfully
   } catch (error) {
     console.error('Logout error:', error);
-    res.status(500).json({ message: 'Error logging out' });
+    sendError(res, 'Code217', 500); // Error logging out
   }
 };
 
@@ -962,7 +957,7 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
   try {
     const userId = req.user?.id;
     if (!userId) {
-      res.status(401).json({ message: 'Not authenticated' });
+      sendError(res, 'Code206', 401); // Not authenticated
       return;
     }
 
@@ -1011,7 +1006,7 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
     }
 
     if (userDeviceSet.size === 0) {
-      res.json([]);
+      sendSuccess(res, 'Code1', []);
       return;
     }
 
@@ -1129,10 +1124,10 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
       return (new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     });
 
-    res.json(result);
+    sendSuccess(res, 'Code1', result);
   } catch (error) {
     console.error('getMySessions error:', error);
-    res.status(500).json({ message: 'Error fetching sessions' });
+    sendError(res, 'Code226', 500); // Error fetching sessions
   }
 };
 
@@ -1140,13 +1135,13 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
   try {
     const userId = req.user?.id;
     if (!userId) {
-      res.status(401).json({ message: 'Not authenticated' });
+      sendError(res, 'Code206', 401); // Not authenticated
       return;
     }
     const { id } = req.params;
     const sessionId = Number(id);
     if (!sessionId || Number.isNaN(sessionId)) {
-      res.status(400).json({ message: 'Invalid session id' });
+      sendError(res, 'Code222', 400); // Invalid session id
       return;
     }
 
@@ -1157,7 +1152,7 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
     });
 
     if (!session) {
-      res.status(404).json({ message: 'Session not found' });
+      sendError(res, 'Code223', 404); // Session not found
       return;
     }
 
@@ -1184,12 +1179,12 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
     });
 
     if (!hasAccessDevice) {
-      res.status(403).json({ message: 'Not allowed to revoke this session' });
+      sendError(res, 'Code224', 403); // Not allowed to revoke this session
       return;
     }
 
     if (!session.is_active && session.revoked_at) {
-      res.json(session);
+      sendSuccess(res, 'Code1', session);
       return;
     }
 
@@ -1219,10 +1214,10 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
       revokedAt,
     });
 
-    res.json(session);
+    sendSuccess(res, 'Code1', session);
   } catch (error) {
     console.error('revokeMySession error:', error);
-    res.status(500).json({ message: 'Error revoking session' });
+    sendError(res, 'Code225', 500); // Error revoking session
   }
 };
 
@@ -1230,7 +1225,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
   try {
     const userId = req.user?.id;
     if (!userId) {
-      res.status(401).json({ message: 'Not authenticated' });
+      sendError(res, 'Code206', 401); // Not authenticated
       return;
     }
     const { id } = req.params;
@@ -1247,7 +1242,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
       });
 
       if (!session) {
-        res.status(404).json({ message: 'Session not found' });
+        sendError(res, 'Code223', 404); // Session not found
         return;
       }
 
@@ -1257,7 +1252,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
       // New format: expect user_id and device_id in request body
       const { user_id: bodyUserId, device_id: bodyDeviceId } = req.body;
       if (!bodyUserId || !bodyDeviceId) {
-        res.status(400).json({ message: 'user_id and device_id are required' });
+        sendError(res, 'Code227', 400); // user_id and device_id are required
         return;
       }
       targetUserId = Number(bodyUserId);
@@ -1287,7 +1282,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
     });
 
     if (!hasAccessDevice) {
-      res.status(403).json({ message: 'Not allowed to lock this device' });
+      sendError(res, 'Code228', 403); // Not allowed to lock this device
       return;
     }
 
@@ -1299,7 +1294,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
     });
 
     if (existingLock) {
-      res.json({ success: true });
+      sendSuccess(res, 'Code1', { success: true });
       return;
     }
 
@@ -1370,10 +1365,10 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
       });
     }
 
-    res.json({ success: true });
+    sendSuccess(res, 'Code1', { success: true });
   } catch (error) {
     console.error('lockDeviceFingerprint error:', error);
-    res.status(500).json({ message: 'Error locking device' });
+    sendError(res, 'Code229', 500); // Error locking device
   }
 };
 
@@ -1381,7 +1376,7 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
   try {
     const userId = req.user?.id;
     if (!userId) {
-      res.status(401).json({ message: 'Not authenticated' });
+      sendError(res, 'Code206', 401); // Not authenticated
       return;
     }
     const { id } = req.params;
@@ -1398,7 +1393,7 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
       });
 
       if (!session) {
-        res.status(404).json({ message: 'Session not found' });
+        sendError(res, 'Code223', 404); // Session not found
         return;
       }
 
@@ -1408,7 +1403,7 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
       // New format: expect user_id and device_id in request body
       const { user_id: bodyUserId, device_id: bodyDeviceId } = req.body;
       if (!bodyUserId || !bodyDeviceId) {
-        res.status(400).json({ message: 'user_id and device_id are required' });
+        sendError(res, 'Code227', 400); // user_id and device_id are required
         return;
       }
       targetUserId = Number(bodyUserId);
@@ -1438,7 +1433,7 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
     });
 
     if (!hasAccessDevice) {
-      res.status(403).json({ message: 'Not allowed to unlock this device' });
+      sendError(res, 'Code228', 403); // Not allowed to unlock this device
       return;
     }
 
@@ -1463,10 +1458,10 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
       clientIp || undefined
     );
 
-    res.json({ success: true });
+    sendSuccess(res, 'Code1', { success: true });
   } catch (error) {
     console.error('unlockDeviceFingerprint error:', error);
-    res.status(500).json({ message: 'Error unlocking device' });
+    sendError(res, 'Code230', 500); // Error unlocking device
   }
 };
 
@@ -1474,7 +1469,7 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
   try {
     const userId = req.user?.id;
     if (!userId) {
-      res.status(401).json({ message: 'Not authenticated' });
+      sendError(res, 'Code206', 401); // Not authenticated
       return;
     }
 
@@ -1489,7 +1484,7 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
     });
 
     if (!user) {
-      res.status(404).json({ message: 'User not found' });
+      sendError(res, 'Code200', 404); // User not found
       return;
     }
 
@@ -1519,7 +1514,7 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
     // The frontend treats it as an opaque token.
     // The backend validates it by comparing the encrypted strings directly.
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       id: user.id,
       name: safeName,
       status: user.status,
@@ -1530,7 +1525,7 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
     });
   } catch (error) {
     console.error('GetUs error:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    sendError(res, 'Code2', 500); // Internal server error
   }
 };
 
@@ -1538,7 +1533,7 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
   try {
     let token = req.cookies?._T || (req.query.token as string);
     if (!token) {
-      res.status(401).json({ message: 'Missing token' });
+      sendError(res, 'Code218', 401); // Missing token
       return;
     }
 
@@ -1550,14 +1545,14 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
     try {
       decoded = jwt.verify(token as string, secret);
     } catch (e) {
-      res.status(401).json({ message: 'Invalid or expired token' });
+      sendError(res, 'Code208', 401); // Invalid or expired token
       return;
     }
 
     const userId = decoded.id as number | undefined;
     const jti = decoded.jti as string | undefined;
     if (!userId || !jti) {
-      res.status(401).json({ message: 'Invalid token payload' });
+      sendError(res, 'Code219', 401); // Invalid token payload
       return;
     }
 
@@ -1570,7 +1565,7 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
     });
 
     if (!session || session.revoked_at) {
-      res.status(401).json({ message: 'Session is not active' });
+      sendError(res, 'Code220', 401); // Session is not active
       return;
     }
 
@@ -1599,7 +1594,7 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
   } catch (error) {
     console.error('sessionEvents error:', error);
     try {
-      res.status(500).json({ message: 'Error establishing session events stream' });
+      sendError(res, 'Code221', 500); // Error establishing session events stream
     } catch {
     }
   }

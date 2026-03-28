@@ -2,16 +2,17 @@ import { Request, Response } from 'express';
 import { BankCatalog } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
+import { sendSuccess, sendError } from '../utils/response';
 
 export const getAll = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const items = await BankCatalog.findAll({
       order: [['name', 'ASC']]
     });
-    res.json(items);
+    sendSuccess(res, 'Code1', items);
   } catch (error) {
     console.error('Error fetching bank catalog:', error);
-    res.status(500).json({ message: 'BC101' });
+    sendError(res, 'Code414', 500); // Error fetching bank catalog
   }
 };
 
@@ -20,14 +21,14 @@ export const create = async (req: AuthRequest, res: Response): Promise<void> => 
     const { name, icon } = req.body;
     
     if (!name) {
-      res.status(400).json({ message: 'BC102' });
+      sendError(res, 'Code415', 400); // Bank name is required
       return;
     }
 
     // Check for duplicate name
     const existing = await BankCatalog.findOne({ where: { name: name.trim() } });
     if (existing) {
-      res.status(400).json({ message: 'BC106' });
+      sendError(res, 'Code416', 400); // Bank catalog item already exists
       return;
     }
 
@@ -38,10 +39,10 @@ export const create = async (req: AuthRequest, res: Response): Promise<void> => 
 
     await logAudit(req.user?.id || null, 'BANK_CATALOG_CREATE', null, { id: item.id, name: item.name, icon: item.icon }, getClientIp(req) || undefined);
 
-    res.status(201).json(item);
+    sendSuccess(res, 'Code417', item, undefined, 201); // Bank catalog item created
   } catch (error) {
     console.error('Error creating bank catalog item:', error);
-    res.status(500).json({ message: 'BC103' });
+    sendError(res, 'Code418', 500); // Error creating bank catalog item
   }
 };
 
@@ -52,7 +53,7 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
     
     const item = await BankCatalog.findByPk(Number(id));
     if (!item) {
-      res.status(404).json({ message: 'BC104' });
+      sendError(res, 'Code419', 404); // Bank catalog item not found
       return;
     }
 
@@ -73,10 +74,10 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
       getClientIp(req) || undefined,
     );
 
-    res.json(item);
+    sendSuccess(res, 'Code420', item); // Bank catalog item updated
   } catch (error) {
     console.error('Error updating bank catalog item:', error);
-    res.status(500).json({ message: 'BC107' });
+    sendError(res, 'Code421', 500); // Error updating bank catalog item
   }
 };
 
@@ -86,7 +87,7 @@ export const remove = async (req: AuthRequest, res: Response): Promise<void> => 
     const item = await BankCatalog.findByPk(Number(id));
     
     if (!item) {
-      res.status(404).json({ message: 'BC104' });
+      sendError(res, 'Code419', 404); // Bank catalog item not found
       return;
     }
 
@@ -95,9 +96,9 @@ export const remove = async (req: AuthRequest, res: Response): Promise<void> => 
     
     await logAudit(req.user?.id || null, 'BANK_CATALOG_DELETE', original, null, getClientIp(req) || undefined);
     
-    res.json({ message: 'Item deleted' });
+    sendSuccess(res, 'Code422'); // Bank catalog item deleted
   } catch (error) {
     console.error('Error deleting bank catalog item:', error);
-    res.status(500).json({ message: 'BC105' });
+    sendError(res, 'Code423', 500); // Error deleting bank catalog item
   }
 };

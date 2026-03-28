@@ -8,16 +8,19 @@ import userRoutes from './userRoutes';
 import roleRoutes from './roleRoutes';
 import permissionRoutes from './permissionRoutes';
 import gameRoutes from './gameRoutes';
+import gameVendorRoutes from './gameVendorRoutes';
 import bankCatalogRoutes from './bankCatalogRoutes';
 import settingRoutes from './settingRoutes';
 import dashboardRoutes from './dashboardRoutes';
 import utilityRoutes from './utilityRoutes';
 import landingPageRoutes from './landingPageRoutes';
+import productRoutes from './productRoutes';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 import { getMaintenanceStatus } from '../middleware/maintenance';
 import { AuditLog, User } from '../models';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendSuccess, sendError } from '../utils/response';
 
 const router = Router();
 
@@ -29,7 +32,9 @@ router.use('/users', userRoutes);
 router.use('/roles', roleRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/games', gameRoutes);
+router.use('/games/:gameId/vendor', gameVendorRoutes);
 router.use('/bank-catalog', bankCatalogRoutes);
+router.use('/products', productRoutes);
 router.use('/settings', settingRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/utility', utilityRoutes);
@@ -61,7 +66,8 @@ router.get(
 			const end = endDate ? parseDateParam(endDate) : null;
 
 			if ((start && isNaN(start.getTime())) || (end && isNaN(end.getTime()))) {
-				return res.status(400).json({ message: 'Invalid date range' });
+				sendError(res, 'Code319', 400);
+				return;
 			}
 
 			if (start && end) {
@@ -176,12 +182,9 @@ router.get(
 			}
 		}
 
-		res.json({
-			logs: payload,
-			operatorOptions
-		});
+		sendSuccess(res, 'Code1', { logs: payload, operatorOptions });
 	} catch (error) {
-		res.status(500).json({ message: 'Failed to fetch audit logs' });
+		sendError(res, 'Code320', 500);
 	}
   }
 );

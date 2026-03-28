@@ -10,7 +10,7 @@ router.use(authenticateToken);
 router.get('/context', requirePermission('route:transactions'), getTransactionsContext);
 router.get('/', requirePermission('route:transactions'), getTransactions);
 router.get('/history', requirePermission('route:transaction_history'), getPlayerTransactionHistory);
-router.post('/', requireAnyPermission(['action:deposit_create', 'action:withdrawal_create']), createTransaction);
+router.post('/', requireAnyPermission(['action:deposit_create', 'action:withdrawal_create', 'action:burn_create']), createTransaction);
 router.put('/:id', requirePermission('action:transaction_edit'), updateTransaction);
 router.post('/:id/void', requirePermission('action:transaction_edit'), voidTransaction);
 

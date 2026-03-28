@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { Setting, User, Role } from '../models';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendWarning, sendError, sendSuccess } from '../utils/response';
 
 type MaintenanceSettings = {
   maintenance_mode?: boolean;
@@ -108,10 +109,7 @@ export const checkMaintenanceMode = async (req: Request, res: Response, next: Ne
     }
 
     if (req.path.startsWith('/api/')) {
-      res.status(503).json({
-        code: 'MAINTENANCE_MODE',
-        data: settings,
-      });
+      sendWarning(res, 'api.systemIsUnderMaintenance', settings, undefined, 503);
       return;
     }
 
@@ -124,8 +122,8 @@ export const checkMaintenanceMode = async (req: Request, res: Response, next: Ne
 export const getMaintenanceStatus = async (req: Request, res: Response) => {
   try {
     const settings = await getMaintenanceSettings();
-    res.json(settings);
+    sendSuccess(res, 'Code1', settings);
   } catch {
-    res.status(500).json({ code: 'MAINTENANCE_STATUS_ERROR' });
+    sendError(res, 'Code2', 500); // Internal server error
   }
 };

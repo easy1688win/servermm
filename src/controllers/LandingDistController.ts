@@ -2,6 +2,7 @@ import { Response } from 'express';
 import archiver from 'archiver';
 import { LandingPage } from '../models';
 import { AuthRequest } from '../middleware/auth';
+import { sendError } from '../utils/response';
 
 const getTrackingBaseUrl = (req: AuthRequest): string => {
   const raw = (process.env.LANDING_TRACK_BASE_URL || '').trim();
@@ -25,13 +26,24 @@ const safeInlineJson = (json: string) => {
     .replace(/\u2029/g, '\\u2029');
 };
 
-const renderIndexHtml = (configJson: string) => {
+const safeHtmlText = (value: any, fallback: string) => {
+  const s = typeof value === 'string' ? value.trim() : '';
+  const raw = s.length > 0 ? s : fallback;
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+const renderIndexHtml = (configJson: string, titleText: string) => {
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-    <title>Landing</title>
+    <title>${titleText}</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
     <link rel="stylesheet" href="./assets/style.css" />
   </head>
@@ -573,13 +585,13 @@ const renderAppJs = () => {
 export const downloadLandingDistZip = async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   if (Number.isNaN(id)) {
-    res.status(400).json({ message: 'LP104' });
+    sendError(res, 'LP104', 400);
     return;
   }
 
   const page = await LandingPage.findByPk(id);
   if (!page) {
-    res.status(404).json({ message: 'LP105' });
+    sendError(res, 'LP105', 404);
     return;
   }
 
@@ -614,7 +626,8 @@ export const downloadLandingDistZip = async (req: AuthRequest, res: Response): P
   archive.pipe(res);
 
   const configJson = safeInlineJson(JSON.stringify(config));
-  archive.append(renderIndexHtml(configJson), { name: 'index.html' });
+  const htmlTitle = safeHtmlText(config.subtitle || config.title || config.name, 'Landing');
+  archive.append(renderIndexHtml(configJson, htmlTitle), { name: 'index.html' });
   archive.append(renderAppJs(), { name: 'assets/app.js' });
   archive.append(renderStyleCss(), { name: 'assets/style.css' });
 

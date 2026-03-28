@@ -1,16 +1,19 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth';
+import { sendError } from '../utils/response';
 
 export const requirePermission = (requiredPermission: string) => {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
-      return res.status(401).json({ message: 'API Access Denied.' });
+      sendError(res, 'Code101', 401);
+      return;
     }
 
     const userPermissions = req.user.permissions || [];
 
     if (!userPermissions.includes(requiredPermission)) {
-      return res.status(403).json({ message: 'Access denied: Insufficient permissions' });
+      sendError(res, 'Code102', 403);
+      return;
     }
 
     next();
@@ -20,7 +23,8 @@ export const requirePermission = (requiredPermission: string) => {
 export const requireAnyPermission = (requiredPermissions: string[]) => {
     return (req: AuthRequest, res: Response, next: NextFunction) => {
       if (!req.user) {
-        return res.status(401).json({ message: 'API Access Denied.' });
+        sendError(res, 'Code101', 401);
+        return;
       }
   
       const userPermissions = req.user.permissions || [];
@@ -28,7 +32,8 @@ export const requireAnyPermission = (requiredPermissions: string[]) => {
       const hasPermission = requiredPermissions.some(p => userPermissions.includes(p));
   
       if (!hasPermission) {
-        return res.status(403).json({ message: 'Access denied: Insufficient permissions' });
+        sendError(res, 'Code102', 403);
+        return;
       }
   
       next();

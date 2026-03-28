@@ -1,12 +1,15 @@
 import { Request, Response } from 'express';
-import { Transaction, BankAccount, Player, User, Game, PlayerStats, GameAdjustment, BankCatalog } from '../models';
+import { Transaction, BankAccount, Player, User, Game, PlayerStats, GameAdjustment, BankCatalog, Product } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
 import { logAudit } from '../services/AuditService';
+import { VendorFactory } from '../services/vendor/VendorFactory';
+import { getTransactionAmounts } from '../services/transactions/transaction-amounts';
 import { Op } from 'sequelize';
 import { sanitizePlayerForResponse } from './PlayerController';
 import { sanitizeBankAccountForResponse } from './BankAccountController';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { sendSuccess, sendError } from '../utils/response';
 
 const normalizeIp = (ip: string | null | undefined): string | null => {
 	if (!ip) return null;
@@ -48,6 +51,58 @@ const resolveOperatorName = (op: any): string | null => {
   }
 
   return rawUsername;
+};
+
+const getPendingReservedWithdrawalByBank = async (tx?: any) => {
+  const rows = (await Transaction.findAll({
+    attributes: [
+      'bank_account_id',
+      [sequelize.fn('SUM', sequelize.col('amount')), 'reserved'],
+    ],
+    where: {
+      status: 'PENDING',
+      type: 'WITHDRAWAL',
+      bank_account_id: { [Op.ne]: null },
+    },
+    group: ['bank_account_id'],
+    raw: true,
+    transaction: tx,
+  } as any)) as any[];
+
+  const map: Record<number, number> = {};
+  for (const r of rows) {
+    const id = Number(r.bank_account_id);
+    if (!Number.isFinite(id)) continue;
+    const v = r.reserved != null ? Number(r.reserved) : 0;
+    map[id] = Number.isFinite(v) ? v : 0;
+  }
+  return map;
+};
+
+const getPendingReservedDepositByGame = async (tx?: any) => {
+  const rows = (await Transaction.findAll({
+    attributes: [
+      'game_id',
+      [sequelize.fn('SUM', sequelize.literal('amount + bonus')), 'reserved'],
+    ],
+    where: {
+      status: 'PENDING',
+      type: 'DEPOSIT',
+      game_id: { [Op.ne]: null },
+    },
+    group: ['game_id'],
+    raw: true,
+    transaction: tx,
+  } as any)) as any[];
+
+  const map: Record<number, number> = {};
+  for (const r of rows) {
+    const id = Number(r.game_id);
+    if (!Number.isFinite(id)) continue;
+    const v = r.reserved != null ? Number(r.reserved) : 0;
+    map[id] = Number.isFinite(v) ? v : 0;
+  }
+  return map;
 };
 
 const shapeTransactionsForResponse = (transactions: any[], userPermissions: string[]) => {
@@ -126,9 +181,9 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
 
     const shaped = shapeTransactionsForResponse(transactions, userPermissions);
 
-    res.json(shaped);
+    sendSuccess(res, 'Code1', shaped);
   } catch (error) {
-    res.status(500).json({ message: 'T891' });
+    sendError(res, 'Code311', 500); // Failed to fetch transaction context
   }
 };
 
@@ -138,12 +193,14 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
 
     const playerIdRaw = (req.query.player_id as string | undefined) ?? (req.query.playerId as string | undefined);
     if (!playerIdRaw) {
-      return res.status(400).json({ message: 'player_id is required' });
+      sendError(res, 'Code304', 400); // player_id is required
+      return;
     }
 
     const playerId = parseInt(playerIdRaw, 10);
     if (!Number.isFinite(playerId) || playerId <= 0) {
-      return res.status(400).json({ message: 'Invalid player_id' });
+      sendError(res, 'Code305', 400); // Invalid player_id
+      return;
     }
 
     const limitRaw = req.query.limit as string | undefined;
@@ -187,9 +244,9 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
       };
     });
 
-    res.json(payload);
+    sendSuccess(res, 'Code1', payload);
   } catch (error) {
-    res.status(500).json({ message: 'T892' });
+    sendError(res, 'Code312', 500); // Failed to fetch player transaction history
   }
 };
 
@@ -295,24 +352,48 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           const type = t.type as string;
           const baseAmount = t.amount != null ? Number(t.amount) : 0;
           const bonusNum = Number((t as any).bonus ?? 0);
+          const walveNum = Number((t as any).walve ?? 0);
+          const tipsNum = Number((t as any).tips ?? 0);
           const gameAfterRaw = (t as any).game_balance_after;
 
           let gameAfter: number | null = null;
           let gameBefore: number | null = null;
           let signedForGame = 0;
-          let amountForReturn = baseAmount;
+          let kioskTotal = baseAmount;
 
           if (type === 'DEPOSIT') {
-            const combined = baseAmount + bonusNum;
-            signedForGame = -combined;
-            amountForReturn = combined;
+            const r = getTransactionAmounts({
+              type: 'DEPOSIT',
+              amount: baseAmount,
+              bonus: bonusNum,
+              walve: 0,
+              tips: 0,
+            });
+            signedForGame = r.gameDelta;
+            kioskTotal = r.displayTotal;
           } else if (type === 'WITHDRAWAL') {
-            const walveWd = Number((t as any).walve ?? 0);
-            const tips = Number((t as any).tips ?? 0);
-            signedForGame = baseAmount + walveWd + tips;
-          } else if (type === 'WALVE' || type === 'BURN') {
-            const walveOnly = Number((t as any).walve ?? 0);
-            signedForGame = walveOnly;
+            const r = getTransactionAmounts({
+              type: 'WITHDRAWAL',
+              amount: baseAmount,
+              bonus: 0,
+              walve: walveNum,
+              tips: tipsNum,
+            });
+            signedForGame = r.gameDelta;
+            kioskTotal = r.displayTotal;
+          } else if (type === 'WALVE') {
+            const r = getTransactionAmounts({
+              type: 'WALVE',
+              amount: 0,
+              bonus: 0,
+              walve: walveNum,
+              tips: 0,
+            });
+            signedForGame = r.gameDelta;
+            kioskTotal = r.displayTotal;
+          } else if (type === 'BURN') {
+            signedForGame = baseAmount;
+            kioskTotal = baseAmount;
           }
 
           if (gameAfterRaw != null) {
@@ -340,9 +421,11 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
             id: t.id,
             createdAt,
             type: t.type,
-            amount: amountForReturn,
-            walve: t.walve ?? null,
-            tips: t.tips ?? null,
+            amount: baseAmount,
+            bonus: bonusNum,
+            walve: walveNum,
+            tips: tipsNum,
+            kiosk_total: kioskTotal,
             status: t.status ?? null,
             game_id: gameId,
             Player: playerGameId
@@ -401,7 +484,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         };
       });
 
-      return res.json({
+      return sendSuccess(res, 'Code1', {
         generatedAt: new Date().toISOString(),
         games,
         gameIconMap,
@@ -628,7 +711,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         };
       });
 
-      const [bankAccounts, games, bankCatalog] = await Promise.all([
+      const [bankAccounts, games, bankCatalog, reservedBankMap, reservedGameMap] = await Promise.all([
         BankAccount.findAll(),
         Game.findAll({
           order: [['name', 'ASC']],
@@ -636,18 +719,27 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         BankCatalog.findAll({
           order: [['name', 'ASC']],
         }),
+        getPendingReservedWithdrawalByBank(),
+        getPendingReservedDepositByGame(),
       ]);
 
       const shapedBankAccountsFull = (bankAccounts as any[]).map((b) =>
         sanitizeBankAccountForResponse(b, userPermissions),
       );
-      const shapedGamesFull = (games as any[]).map((g: any) => ({
-        id: g.id,
-        name: g.name,
-        icon: g.icon,
-        status: g.status,
-        balance: Number(g.balance),
-      }));
+      const shapedGamesFull = (games as any[]).map((g: any) => {
+        const balance = Number(g.balance);
+        const reserved = reservedGameMap[g.id] ?? 0;
+        const available = Number.isFinite(balance) ? balance - Number(reserved || 0) : balance;
+        return {
+          id: g.id,
+          name: g.name,
+          icon: g.icon,
+          status: g.status,
+          balance,
+          reserved_balance: Number(reserved || 0),
+          available_balance: available,
+        };
+      });
 
       const gameIconMap: Record<string, string | null> = {};
       for (const g of games as any[]) {
@@ -723,11 +815,24 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
          }
       }
 
-      return res.json({
+      const shapedBankAccountsWithAvailability = (shapedBankAccountsFull as any[]).map((b: any) => {
+        const total = typeof b.total_balance === 'number' ? Number(b.total_balance) : null;
+        if (total == null) {
+          return { ...b, reserved_balance: null, available_balance: null };
+        }
+        const reserved = reservedBankMap[b.id] ?? 0;
+        return {
+          ...b,
+          reserved_balance: Number(reserved || 0),
+          available_balance: total - Number(reserved || 0),
+        };
+      });
+
+      sendSuccess(res, 'Code1', {
         transactions: payloadTransactions,
         games: shapedGamesFull,
         gameIconMap,
-        bankAccounts: shapedBankAccountsFull,
+        bankAccounts: shapedBankAccountsWithAvailability,
         bankIconMap,
         pagination: {
           page,
@@ -737,11 +842,12 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         },
         operatorOptions,
       });
+      return;
     }
 
     const where: any = {};
 
-    const [transactions, bankAccounts, games] = await Promise.all([
+    const [transactions, bankAccounts, games, reservedBankMap, reservedGameMap] = await Promise.all([
       Transaction.findAll({
         where,
       include: [
@@ -760,7 +866,9 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       Game.findAll({
         where: { status: 'active' },
         order: [['name', 'ASC']]
-      })
+      }),
+      getPendingReservedWithdrawalByBank(),
+      getPendingReservedDepositByGame(),
     ]);
 
     const txPermissions = userPermissions;
@@ -817,13 +925,32 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
     const shapedBankAccountsFull = (bankAccounts as any[]).map((b) =>
       sanitizeBankAccountForResponse(b, userPermissions),
     );
-    const shapedGamesFull = (games as any[]).map((g: any) => ({
-      id: g.id,
-      name: g.name,
-      icon: g.icon,
-      status: g.status,
-      balance: Number(g.balance),
-    }));
+    const shapedBankAccountsWithAvailability = (shapedBankAccountsFull as any[]).map((b: any) => {
+      const total = typeof b.total_balance === 'number' ? Number(b.total_balance) : null;
+      if (total == null) {
+        return { ...b, reserved_balance: null, available_balance: null };
+      }
+      const reserved = reservedBankMap[b.id] ?? 0;
+      return {
+        ...b,
+        reserved_balance: Number(reserved || 0),
+        available_balance: total - Number(reserved || 0),
+      };
+    });
+    const shapedGamesFull = (games as any[]).map((g: any) => {
+      const balance = Number(g.balance);
+      const reserved = reservedGameMap[g.id] ?? 0;
+      const available = Number.isFinite(balance) ? balance - Number(reserved || 0) : balance;
+      return {
+        id: g.id,
+        name: g.name,
+        icon: g.icon,
+        status: g.status,
+        balance,
+        reserved_balance: Number(reserved || 0),
+        available_balance: available,
+      };
+    });
 
     const payloadTransactions =
       scope === 'history'
@@ -888,7 +1015,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
             id: b.id,
             bank_name: b.bank_name,
           }))
-        : shapedBankAccountsFull;
+        : shapedBankAccountsWithAvailability;
 
     const payloadGames =
       scope === 'history'
@@ -898,235 +1025,457 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           }))
         : shapedGamesFull;
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       transactions: payloadTransactions,
       bankAccounts: payloadBankAccounts,
       games: payloadGames,
     });
   } catch (error) {
-    res.status(500).json({ message: 'T893' });
+    sendError(res, 'Code313', 500); // Failed to fetch transaction context
   }
 };
 
 export const createTransaction = async (req: AuthRequest, res: Response) => {
-  const t = await sequelize.transaction();
+  let pendingTransaction: any | null = null;
+  let ctxPlayerId: number | null = null;
+  let ctxGameId: number | null = null;
+  let ctxGameAccountId: string | null = null;
   try {
-		const clientIp = getClientIp(req);
+    const clientIp = getClientIp(req);
     const { player_id, bank_account_id, type, amount, game_id, game_account_id } = req.body;
+    ctxPlayerId = typeof player_id === 'number' ? player_id : (player_id ? Number(player_id) : null);
+    ctxGameId = typeof game_id === 'number' ? game_id : (game_id ? Number(game_id) : null);
+    ctxGameAccountId = typeof game_account_id === 'string' ? game_account_id : null;
     const bonusRaw = (req.body.bonus ?? 0) as number | string;
     const tipsRaw = (req.body.tips ?? 0) as number | string;
     const remark: string | null = (req.body.remark ?? req.body.staff_note ?? null) as string | null;
     const operator_id = req.user.id;
     const userPermissions = req.user.permissions || [];
 
-    // Permission Check
     if (type === 'DEPOSIT' && !userPermissions.includes('action:deposit_create')) {
-        await t.rollback();
-        return res.status(403).json({ message: 'Access denied: Cannot create deposits' });
+      sendError(res, 'Code301', 403);
+      return;
     }
     if (type === 'WITHDRAWAL' && !userPermissions.includes('action:withdrawal_create')) {
-        await t.rollback();
-        return res.status(403).json({ message: 'Access denied: Cannot create withdrawals' });
+      sendError(res, 'Code302', 403);
+      return;
     }
     if (type === 'WALVE' && !userPermissions.includes('action:burn_create')) {
-        await t.rollback();
-        return res.status(403).json({ message: 'Access denied: Cannot create walve transactions' });
+      sendError(res, 'Code303', 403);
+      return;
     }
 
-    const transactionAmount = parseFloat(amount ?? 0);
-    const transactionWalve = parseFloat((bonusRaw as any) || 0);
-    const transactionTips = parseFloat((tipsRaw as any) || 0);
-
-    // 1. Load related records
-    const bankAccount = type === 'WALVE'
-      ? null
-      : await BankAccount.findByPk(bank_account_id, {
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        } as any);
-    if (type !== 'WALVE' && !bankAccount) {
-      throw new Error('Bank account not found');
-    }
-    const player = await Player.findByPk(player_id, { transaction: t });
-    if (!player) {
-      throw new Error('Player not found');
-    }
-
-    let game: any | null = null;
-    const effectiveGameId = game_id || null;
-    if (effectiveGameId) {
-      game = await Game.findByPk(effectiveGameId, {
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      } as any);
-    }
-
-    // Check sufficiency for withdrawal (bank only承担 Amount)
-    if (type === 'WITHDRAWAL' && bankAccount) {
-        const requiredAmount = transactionAmount;
-        const currentBalance = Number(bankAccount.total_balance);
-        if (currentBalance < requiredAmount) {
-            throw new Error(`Insufficient funds in bank account. Available: ${currentBalance}, Required: ${requiredAmount}`);
-        }
-    }
-
-    // 2. Update Game Balance (if linked)
-    let gameBalanceAfter: number | null = null;
-    if (game) {
-      const beforeGameBalance = Number(game.balance);
-
-      if (type === 'DEPOSIT') {
-        const requiredFromGame = transactionAmount + transactionWalve;
-        if (beforeGameBalance < requiredFromGame) {
-          throw new Error('T894');
-        }
-        game.balance = beforeGameBalance - requiredFromGame;
-      } else if (type === 'WITHDRAWAL') {
-        // WITHDRAWAL: Game 承担 Amount + Walve + Tips
-        game.balance = beforeGameBalance + transactionAmount + transactionWalve + transactionTips;
-      } else if (type === 'WALVE') {
-        // WALVE: 只有 Walve 影响游戏
-        game.balance = beforeGameBalance + transactionWalve;
-      }
-
-      await game.save({ transaction: t });
-      gameBalanceAfter = Number(game.balance);
-    }
-
-    // 3. Update Bank Account Balance（Walve/Tips 不影响银行）
-    let bankBalanceAfter: number | null = null;
-    if (bankAccount) {
-      if (type === 'DEPOSIT') {
-        // Deposit: Amount 进银行，Bonus 不影响银行
-        // @ts-ignore
-        bankAccount.total_balance = Number(bankAccount.total_balance) + transactionAmount;
-      } else if (type === 'WITHDRAWAL') {
-        // Withdrawal: 只有 Amount 从银行出
-        // @ts-ignore
-        bankAccount.total_balance = Number(bankAccount.total_balance) - transactionAmount;
-      } else if (type === 'ADJUSTMENT') {
-        // 保持原有逻辑，由其它入口控制
-      }
-      await bankAccount.save({ transaction: t });
-      // @ts-ignore
-      bankBalanceAfter = Number(bankAccount.total_balance);
-    } else if (type === 'WALVE') {
-      // WALVE 交易与银行无关，为兼容旧表 NOT NULL 约束，写 0
-      bankBalanceAfter = 0;
-    }
-
-    // 4. Update PlayerStats
-    const now = new Date();
-    const statsDate = now.toISOString().slice(0, 10);
     const isDeposit = type === 'DEPOSIT';
     const isWithdrawal = type === 'WITHDRAWAL';
     const isWalve = type === 'WALVE';
 
-    let stats = await PlayerStats.findOne({
-      where: { player_id, date: statsDate },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    } as any);
+    const amountRaw = parseFloat(amount ?? 0);
+    const bonusAmount = parseFloat((bonusRaw as any) || 0);
+    const walveAmount = parseFloat(((req.body.walve ?? 0) as any) || 0);
+    const tipsAmount = parseFloat((tipsRaw as any) || 0);
+    const effectiveGameId = game_id || null;
 
-    if (!stats) {
-      stats = await PlayerStats.create(
+    const amountForType = isWalve ? 0 : amountRaw;
+    const bonusForType = isDeposit ? bonusAmount : 0;
+    const walveForType = isWithdrawal || isWalve ? walveAmount : 0;
+    const tipsForType = isWithdrawal ? tipsAmount : 0;
+
+    const amounts = getTransactionAmounts({
+      type,
+      amount: amountForType,
+      bonus: bonusForType,
+      walve: walveForType,
+      tips: tipsForType,
+    });
+
+    const reserveBank = amounts.bankDelta < 0 ? -amounts.bankDelta : 0;
+    const reserveGame = amounts.gameDelta < 0 ? -amounts.gameDelta : 0;
+
+    const fmt = (n: number) => `$${Number(n).toFixed(2)}`;
+    const insufficientFundsDetail = (available: number) => `Insufficient Funds ${fmt(available)}`;
+    const balanceError = (code: 'T903' | 'T904', available: number) => {
+      throw new Error(`BALANCE_ERR:${code}:${insufficientFundsDetail(available)}`);
+    };
+
+    const tReserve = await sequelize.transaction();
+    let gameUseApi = false;
+    try {
+      const bankAccount = type === 'WALVE'
+        ? null
+        : await BankAccount.findByPk(bank_account_id, {
+            transaction: tReserve,
+            lock: tReserve.LOCK.UPDATE,
+          } as any);
+      if (type !== 'WALVE' && !bankAccount) {
+        await tReserve.rollback();
+        sendError(res, 'Code306', 400, { detail: 'Bank account not found' });
+        return;
+      }
+
+      const gameLocked = effectiveGameId
+        ? await Game.findByPk(effectiveGameId as any, {
+            transaction: tReserve,
+            lock: tReserve.LOCK.UPDATE,
+          } as any)
+        : null;
+      if (!gameLocked) {
+        await tReserve.rollback();
+        sendError(res, 'Code307', 400, { detail: 'Game not found' });
+        return;
+      }
+
+      gameUseApi = Boolean((gameLocked as any).use_api);
+
+      if (reserveBank > 0 && bankAccount) {
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(tReserve);
+        const reservedExisting = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+        const currentBalance = Number((bankAccount as any).total_balance);
+        const available = currentBalance - reservedExisting;
+        if (available < reserveBank) balanceError('T903', available);
+      }
+      if (reserveGame > 0) {
+        const reservedGameMap = await getPendingReservedDepositByGame(tReserve);
+        const reservedExisting = Number(reservedGameMap[(gameLocked as any).id] ?? 0);
+        const currentBalance = Number((gameLocked as any).balance);
+        const available = currentBalance - reservedExisting;
+        if (available < reserveGame) balanceError('T904', available);
+      }
+
+      pendingTransaction = await Transaction.create(
         {
           player_id,
-          date: statsDate,
+          bank_account_id: type === 'WALVE' ? null : bank_account_id,
+          game_id: effectiveGameId,
+          game_account_id,
+          operator_id,
+          type,
+          amount: amountForType,
+          bonus: bonusForType,
+          tips: tipsForType,
+          walve: walveForType,
+          remark,
+          ip_address: clientIp,
+          status: 'PENDING',
+          bank_balance_after: null,
+          game_balance_after: null,
         },
-        { transaction: t },
+        { transaction: tReserve },
       );
+
+      await tReserve.commit();
+    } catch (e) {
+      if (!(tReserve as any).finished) await tReserve.rollback();
+      throw e;
     }
 
-    const currentTotalDeposit = Number((stats as any).total_deposit || 0);
-    const currentTotalWithdraw = Number((stats as any).total_withdraw || 0);
-    const currentTotalWalve = Number((stats as any).total_walve || 0);
-    const currentTotalTips = Number((stats as any).total_tips || 0);
-    const currentTotalBonus = Number((stats as any).total_bonus || 0);
+    const requestId = String(pendingTransaction.id);
 
-    if (isDeposit) {
-      (stats as any).deposit_count = Number((stats as any).deposit_count || 0) + 1;
-      (stats as any).total_deposit = currentTotalDeposit + transactionAmount;
-      const last = (stats as any).last_deposit_at
-        ? new Date((stats as any).last_deposit_at)
-        : null;
-      if (!last || now > last) {
-        (stats as any).last_deposit_at = now;
+    if (gameUseApi) {
+      const gameForVendor = effectiveGameId ? await Game.findByPk(effectiveGameId as any) : null;
+      const vendor = gameForVendor ? await VendorFactory.getServiceByGame((gameForVendor as any).id) : null;
+      if (vendor) {
+        if (!game_account_id || typeof game_account_id !== 'string') {
+          throw new Error('Game account is required for vendor transfer');
+        }
+        let vendorOk = false;
+        const throwApiError = (vendorMessage?: string) => {
+          const e: any = new Error('API ERROR');
+          if (vendorMessage) e.vendorMessage = vendorMessage;
+          throw e;
+        };
+        const verifyIfSupported = async () => {
+          if (!vendor.verifyTransfer) return false;
+          const delaysMs = [0, 1500, 4000];
+          for (let i = 0; i < delaysMs.length; i++) {
+            const delay = delaysMs[i];
+            if (delay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+            try {
+              const chk = await vendor.verifyTransfer(requestId);
+              if (chk?.success) return true;
+              const errMsg = (chk as any)?.error || (chk as any)?.message;
+              const retry = vendor.shouldVerifyTransferOnError?.(errMsg) ?? false;
+              if (!retry) return false;
+            } catch (e: any) {
+              const errMsg = String(e?.message ?? e ?? '');
+              const retry = vendor.shouldVerifyTransferOnError?.(errMsg) ?? false;
+              if (!retry) return false;
+            }
+          }
+          return false;
+        };
+        if (type === 'DEPOSIT') {
+          let vendorMessage: string | undefined;
+          let needVerify = false;
+          try {
+            const v = await vendor.deposit(game_account_id, amounts.vendorTransfer, requestId);
+            vendorOk = !!v.success;
+            if (!vendorOk) {
+              vendorMessage = v.error || v.message;
+              needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
+            }
+          } catch (e: any) {
+            vendorOk = false;
+            vendorMessage = String(e?.message ?? e ?? '');
+            needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? true;
+          }
+          if (!vendorOk && needVerify) vendorOk = await verifyIfSupported();
+          if (!vendorOk) throwApiError(vendorMessage);
+        } else if (type === 'WITHDRAWAL' || type === 'WALVE') {
+          let vendorMessage: string | undefined;
+          let needVerify = false;
+          try {
+            const v = await vendor.withdraw(game_account_id, amounts.vendorTransfer, requestId);
+            vendorOk = !!v.success;
+            if (!vendorOk) {
+              vendorMessage = v.error || v.message;
+              needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
+            }
+          } catch (e: any) {
+            vendorOk = false;
+            vendorMessage = String(e?.message ?? e ?? '');
+            needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? true;
+          }
+          if (!vendorOk && needVerify) vendorOk = await verifyIfSupported();
+          if (!vendorOk) throwApiError(vendorMessage);
+        }
       }
     }
 
-    if (isWithdrawal) {
-      (stats as any).withdraw_count = Number((stats as any).withdraw_count || 0) + 1;
-      (stats as any).total_withdraw = currentTotalWithdraw + transactionAmount;
-      const last = (stats as any).last_withdraw_at
-        ? new Date((stats as any).last_withdraw_at)
-        : null;
-      if (!last || now > last) {
-        (stats as any).last_withdraw_at = now;
+    const tFinal = await sequelize.transaction();
+    try {
+      const bankAccount = type === 'WALVE'
+        ? null
+        : await BankAccount.findByPk(bank_account_id, {
+            transaction: tFinal,
+            lock: tFinal.LOCK.UPDATE,
+          } as any);
+      if (type !== 'WALVE' && !bankAccount) {
+        throw new Error('Bank account not found');
       }
+
+      const player = await Player.findByPk(player_id, { transaction: tFinal });
+      if (!player) {
+        throw new Error('Player not found');
+      }
+
+      const gameLocked = effectiveGameId
+        ? await Game.findByPk(effectiveGameId, {
+            transaction: tFinal,
+            lock: tFinal.LOCK.UPDATE,
+          } as any)
+        : null;
+      if (!gameLocked) {
+        throw new Error('Game not found');
+      }
+
+      if (reserveBank > 0 && bankAccount) {
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(tFinal);
+        const reservedAll = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+        const reservedOther = reservedAll - reserveBank;
+        const total = Number((bankAccount as any).total_balance);
+        const next = total + amounts.bankDelta;
+        if (next < reservedOther) balanceError('T903', total - reservedAll);
+      }
+      if (reserveGame > 0) {
+        const reservedGameMap = await getPendingReservedDepositByGame(tFinal);
+        const reservedAll = Number(reservedGameMap[(gameLocked as any).id] ?? 0);
+        const reservedOther = reservedAll - reserveGame;
+        const total = Number((gameLocked as any).balance);
+        const next = total + amounts.gameDelta;
+        if (next < reservedOther) balanceError('T904', total - reservedAll);
+      }
+
+      let gameBalanceAfter: number | null = null;
+      if (gameLocked) {
+        const beforeGameBalance = Number((gameLocked as any).balance);
+        (gameLocked as any).balance = beforeGameBalance + amounts.gameDelta;
+        await (gameLocked as any).save({ transaction: tFinal });
+        gameBalanceAfter = Number((gameLocked as any).balance);
+      }
+
+      let bankBalanceAfter: number | null = null;
+      if (bankAccount) {
+        (bankAccount as any).total_balance = Number((bankAccount as any).total_balance) + amounts.bankDelta;
+        await (bankAccount as any).save({ transaction: tFinal });
+        bankBalanceAfter = Number((bankAccount as any).total_balance);
+      } else if (type === 'WALVE') {
+        bankBalanceAfter = 0;
+      }
+
+      const now = new Date();
+      const statsDate = now.toISOString().slice(0, 10);
+      let stats = await PlayerStats.findOne({
+        where: { player_id, date: statsDate },
+        transaction: tFinal,
+        lock: tFinal.LOCK.UPDATE,
+      } as any);
+      if (!stats) {
+        stats = await PlayerStats.create(
+          { player_id, date: statsDate },
+          { transaction: tFinal },
+        );
+      }
+
+      const currentTotalDeposit = Number((stats as any).total_deposit || 0);
+      const currentTotalWithdraw = Number((stats as any).total_withdraw || 0);
+      const currentTotalWalve = Number((stats as any).total_walve || 0);
+      const currentTotalTips = Number((stats as any).total_tips || 0);
+      const currentTotalBonus = Number((stats as any).total_bonus || 0);
+
+      if (isDeposit) {
+        (stats as any).deposit_count = Number((stats as any).deposit_count || 0) + 1;
+        (stats as any).total_deposit = currentTotalDeposit + amountForType;
+        const last = (stats as any).last_deposit_at
+          ? new Date((stats as any).last_deposit_at)
+          : null;
+        if (!last || now > last) {
+          (stats as any).last_deposit_at = now;
+        }
+      }
+      if (isWithdrawal) {
+        (stats as any).withdraw_count = Number((stats as any).withdraw_count || 0) + 1;
+        (stats as any).total_withdraw = currentTotalWithdraw + amountForType;
+        const last = (stats as any).last_withdraw_at
+          ? new Date((stats as any).last_withdraw_at)
+          : null;
+        if (!last || now > last) {
+          (stats as any).last_withdraw_at = now;
+        }
+      }
+
+      if (isDeposit && bonusForType) {
+        (stats as any).total_bonus = currentTotalBonus + bonusForType;
+      }
+      if (isWithdrawal && walveForType) {
+        (stats as any).total_walve = currentTotalWalve + walveForType;
+      }
+      if (isWithdrawal && tipsForType) {
+        (stats as any).total_tips = currentTotalTips + tipsForType;
+      }
+      if (isWalve && walveForType) {
+        (stats as any).total_walve = currentTotalWalve + walveForType;
+      }
+
+      await stats.save({ transaction: tFinal });
+
+      await Transaction.update(
+        {
+          status: 'COMPLETED',
+          bank_balance_after: bankBalanceAfter,
+          game_balance_after: gameBalanceAfter,
+        },
+        { where: { id: pendingTransaction.id }, transaction: tFinal },
+      );
+
+      await tFinal.commit();
+
+      await pendingTransaction.reload();
+
+      const actionSuffix =
+        type === 'DEPOSIT'
+          ? 'DEPOSIT'
+          : type === 'WITHDRAWAL'
+          ? 'WITHDRAWAL'
+          : type === 'WALVE'
+          ? 'WALVE'
+          : 'UNKNOWN';
+      await logAudit(
+        operator_id,
+        `TRANSACTION_CREATE_${actionSuffix}`,
+        null,
+        pendingTransaction.toJSON(),
+        clientIp || undefined,
+      );
+
+      sendSuccess(res, 'Code300', pendingTransaction, undefined, 201);
+    } catch (e) {
+      if (!(tFinal as any).finished) await tFinal.rollback();
+      throw e;
     }
-
-    const walvePart =
-      isWithdrawal || isWalve ? transactionWalve : 0;
-    const tipsPart = isWithdrawal ? transactionTips : 0;
-    const bonusPart = isDeposit ? transactionWalve : 0;
-
-    if (walvePart) {
-      (stats as any).total_walve = currentTotalWalve + walvePart;
-    }
-    if (tipsPart) {
-      (stats as any).total_tips = currentTotalTips + tipsPart;
-    }
-    if (bonusPart) {
-      (stats as any).total_bonus = currentTotalBonus + bonusPart;
-    }
-
-    await stats.save({ transaction: t });
-
-    // 6. Create Transaction
-		const transaction = await Transaction.create({
-      player_id,
-      bank_account_id: type === 'WALVE' ? null : bank_account_id,
-      game_id: effectiveGameId,
-      game_account_id,
-      operator_id,
-      type,
-      amount: type === 'WALVE' ? 0 : amount,
-      bonus: isDeposit ? transactionWalve : 0,
-      tips: transactionTips,
-      walve: isWithdrawal || type === 'WALVE' ? transactionWalve : 0,
-      remark,
-      ip_address: clientIp,
-      status: 'COMPLETED',
-      bank_balance_after: bankBalanceAfter,
-      game_balance_after: gameBalanceAfter,
-    }, { transaction: t });
-
-		await t.commit();
-		
-    const actionSuffix =
-      type === 'DEPOSIT'
-        ? 'DEPOSIT'
-        : type === 'WITHDRAWAL'
-        ? 'WITHDRAWAL'
-        : type === 'WALVE'
-        ? 'WALVE'
-        : 'UNKNOWN';
-		await logAudit(
-      operator_id,
-      `TRANSACTION_CREATE_${actionSuffix}`,
-      null,
-      transaction.toJSON(),
-      clientIp || undefined
-    );
-
-    res.status(201).json(transaction);
   } catch (error: any) {
-    if (!(t as any).finished) {
-        await t.rollback();
+    const rawOuterMsg = String(error?.message ?? '');
+    const lower = rawOuterMsg.toLowerCase();
+    if (rawOuterMsg.startsWith('BALANCE_ERR:')) {
+      const parts = rawOuterMsg.split(':');
+      const code = (parts[1] || 'T900') as string;
+      const detail = parts.slice(2).join(':') || 'Invalid balance';
+      if (pendingTransaction) {
+        try {
+          const existingRemark =
+            typeof pendingTransaction.remark === 'string' && pendingTransaction.remark.trim().length > 0
+              ? pendingTransaction.remark.trim()
+              : null;
+          const rejectedRemark = `${existingRemark ? `${existingRemark}\n` : ''}${detail}`;
+          await Transaction.update(
+            { status: 'REJECTED', remark: rejectedRemark },
+            { where: { id: pendingTransaction.id } },
+          );
+          await pendingTransaction.reload();
+        } catch {
+        }
+      }
+      if (code === 'T903') {
+        sendError(res, 'Code309', 400, { detail });
+        return;
+      } else if (code === 'T904') {
+        sendError(res, 'Code310', 400, { detail });
+        return;
+      }
+      sendError(res, 'Code308', 400, { detail });
+      return;
     }
-    console.error('Transaction Error:', error);
-    res.status(500).json({ message: 'T894' });
+
+    let responseDetail: string | null = null;
+    if (pendingTransaction) {
+      try {
+        const rawMsg = String(error?.vendorMessage ?? error?.error ?? error?.message ?? error ?? '');
+        const msgLower = rawMsg.toLowerCase();
+        let categoryRemark = 'API ERROR';
+        if (msgLower.includes('suspended')) categoryRemark = 'Player account is suspended';
+        else if (msgLower.includes('insufficient')) categoryRemark = 'Insufficient Credit';
+        else if (msgLower.includes('not found')) categoryRemark = 'Player Not Found';
+        else if (msgLower.includes('timeout') || msgLower.includes('network') || msgLower.includes('ecconnrefused')) categoryRemark = 'Network Error';
+        responseDetail = categoryRemark;
+
+        const existingRemark =
+          typeof pendingTransaction.remark === 'string' && pendingTransaction.remark.trim().length > 0
+            ? pendingTransaction.remark.trim()
+            : null;
+        const rejectedRemark = `${existingRemark ? `${existingRemark}\n` : ''}${categoryRemark}`;
+
+        if (msgLower.includes('suspended')) {
+          try {
+            const [playerForSync, gameForSync] = await Promise.all([
+              ctxPlayerId ? Player.findByPk(ctxPlayerId) : Promise.resolve(null),
+              ctxGameId ? Game.findByPk(ctxGameId) : Promise.resolve(null),
+            ]);
+            const meta = (playerForSync as any)?.metadata;
+            const gameName = (gameForSync as any)?.name;
+            if (playerForSync && meta && typeof meta === 'object' && Array.isArray((meta as any).gameAccounts) && gameName) {
+              const nextAccounts = (meta as any).gameAccounts.map((ga: any) => {
+                if (ctxGameAccountId && String(ga?.accountId || '') === String(ctxGameAccountId) && String(ga?.gameName || '') === String(gameName)) {
+                  return { ...ga, isEnabled: false, vendorStatusMessage: 'Player account is suspended' };
+                }
+                return ga;
+              });
+              (playerForSync as any).metadata = { ...(meta as any), gameAccounts: nextAccounts };
+              await (playerForSync as any).save();
+            }
+          } catch {
+          }
+        }
+
+        await Transaction.update(
+          { status: 'REJECTED', remark: rejectedRemark },
+          { where: { id: pendingTransaction.id } },
+        );
+        await pendingTransaction.reload();
+      } catch {
+      }
+    }
+    sendError(res, 'Code2', 500, { detail: responseDetail });
   }
 };
 
@@ -1139,13 +1488,15 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
 
     if (!userPermissions.includes('action:transaction_edit')) {
       await t.rollback();
-      return res.status(403).json({ message: 'Access denied: Cannot edit transactions' });
+      sendError(res, 'Code314', 403); // Access denied: Cannot edit transactions
+      return;
     }
 
     const transaction = await Transaction.findByPk(id, { transaction: t } as any);
     if (!transaction) {
       await t.rollback();
-      return res.status(404).json({ message: 'Transaction not found' });
+      sendError(res, 'Code315', 404); // Transaction not found
+      return;
     }
 
     const original = transaction.toJSON();
@@ -1178,13 +1529,12 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
       clientIp || undefined
     );
 
-    return res.json(transaction);
+    sendSuccess(res, 'Code1', transaction);
   } catch (error: any) {
     if (!(t as any).finished) {
       await t.rollback();
     }
-    console.error('Transaction Edit Error:', error);
-    return res.status(500).json({ message: 'T895' });
+    sendError(res, 'Code316', 500); // Failed to edit transaction
   }
 };
 
@@ -1193,7 +1543,7 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
     try {
 				const clientIp = getClientIp(req);
         const { id } = req.params;
-        const transaction = await Transaction.findByPk(Number(id), { transaction: t });
+        const transaction = await Transaction.findByPk(Number(id), { transaction: t, lock: t.LOCK.UPDATE } as any);
         
         if (!transaction) {
             throw new Error('Transaction not found');
@@ -1205,7 +1555,7 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         const bankAccountId = transaction.bank_account_id as number | null;
         const bankAccount = transaction.type === 'WALVE' || bankAccountId == null
           ? null
-          : await BankAccount.findByPk(bankAccountId, { transaction: t });
+          : await BankAccount.findByPk(bankAccountId, { transaction: t, lock: t.LOCK.UPDATE } as any);
         if (transaction.type !== 'WALVE' && !bankAccount) throw new Error('Bank Account not found');
 
         const player = transaction.player_id
@@ -1215,12 +1565,21 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         let game: any | null = null;
         const effectiveGameId = (transaction as any).game_id || null;
         if (effectiveGameId) {
-          game = await Game.findByPk(effectiveGameId, { transaction: t });
+          game = await Game.findByPk(effectiveGameId, { transaction: t, lock: t.LOCK.UPDATE } as any);
         }
 
         const amount = Number(transaction.amount);
-        const fee = Number((transaction as any).walve || (transaction as any).bonus || 0);
+        const bonus = Number((transaction as any).bonus || 0);
+        const walve = Number((transaction as any).walve || 0);
         const tips = Number((transaction as any).tips || 0);
+
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(t);
+        const reservedGameMap = await getPendingReservedDepositByGame(t);
+        const fmt = (n: number) => `$${Number(n).toFixed(2)}`;
+        const insufficientFundsDetail = (available: number) => `Insufficient Funds ${fmt(available)}`;
+        const balanceError = (code: 'T903' | 'T904', available: number) => {
+          throw new Error(`BALANCE_ERR:${code}:${insufficientFundsDetail(available)}`);
+        };
 
         // Reverse logic
         if (transaction.type === 'DEPOSIT') {
@@ -1231,12 +1590,17 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
             //   Bank:   balance -= amount
             //   Game:   balance += (amount + fee)
 
-            // @ts-ignore
-            bankAccount.total_balance = Number(bankAccount.total_balance) - amount;
+            if (bankAccount) {
+              const reservedBank = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+              const currentTotal = Number((bankAccount as any).total_balance);
+              const nextTotal = currentTotal - amount;
+              if (nextTotal < reservedBank) balanceError('T903', currentTotal - reservedBank);
+              (bankAccount as any).total_balance = nextTotal;
+            }
 
             if (game) {
                 const beforeGame = Number(game.balance);
-                game.balance = beforeGame + (amount + fee);
+                game.balance = beforeGame + (amount + bonus);
                 await game.save({ transaction: t });
             }
 
@@ -1258,7 +1622,10 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
 
              if (game) {
                 const beforeGame = Number(game.balance);
-                game.balance = beforeGame - (amount + fee + tips);
+                game.balance = beforeGame - (amount + walve + tips);
+                const reservedGame = Number(reservedGameMap[(game as any).id] ?? 0);
+                const next = Number(game.balance);
+                if (next < reservedGame) balanceError('T904', beforeGame - reservedGame);
                 await game.save({ transaction: t });
              }
 
@@ -1268,17 +1635,22 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         } else if (transaction.type === 'ADJUSTMENT') {
             // Original: balance += amount (signed)
             // Revert: balance -= amount
-            // @ts-ignore
             if (bankAccount) {
-              // @ts-ignore
-              bankAccount.total_balance = Number(bankAccount.total_balance) - amount;
+              const reservedBank = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+              const currentTotal = Number((bankAccount as any).total_balance);
+              const nextTotal = currentTotal - amount;
+              if (nextTotal < reservedBank) balanceError('T903', currentTotal - reservedBank);
+              (bankAccount as any).total_balance = nextTotal;
             }
         } else if (transaction.type === 'WALVE') {
-            // 原规则：Game += fee（walve），Bank 不变
-            // 撤销：Game -= fee
+            // 规则：WALVE 原交易 Game += walve，Bank 不变
+            // 撤销：Game -= walve
             if (game) {
               const beforeGame = Number(game.balance);
-              game.balance = beforeGame - fee;
+              game.balance = beforeGame - walve;
+              const reservedGame = Number(reservedGameMap[(game as any).id] ?? 0);
+              const next = Number(game.balance);
+              if (next < reservedGame) balanceError('T904', beforeGame - reservedGame);
               await game.save({ transaction: t });
             }
         }
@@ -1330,10 +1702,9 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
             (stats as any).total_withdraw = currentTotalWithdraw - amount;
           }
 
-          const walvePart =
-            isWithdrawal || isWalve ? fee : 0;
+          const walvePart = isWithdrawal || isWalve ? walve : 0;
           const tipsPart = isWithdrawal ? tips : 0;
-          const bonusPart = fee;
+          const bonusPart = isDeposit ? bonus : 0;
 
           if (walvePart) {
             (stats as any).total_walve = currentTotalWalve - walvePart;
@@ -1373,10 +1744,25 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
           clientIp || undefined
         );
         
-        res.json({ message: 'Transaction voided successfully' });
+        sendSuccess(res, 'Code317'); // Transaction voided successfully
     } catch (error: any) {
         if (!(t as any).finished) await t.rollback();
-        console.error('Void Transaction Error:', error);
-        res.status(500).json({ message: 'T896' });
+        const msg = String(error?.message ?? '');
+        if (msg.startsWith('BALANCE_ERR:')) {
+          const parts = msg.split(':');
+          const code = (parts[1] || 'T900') as string;
+          const detail = parts.slice(2).join(':') || 'Invalid balance';
+          if (code === 'T903') {
+            sendError(res, 'Code309', 400, { detail });
+            return;
+          }
+          if (code === 'T904') {
+            sendError(res, 'Code310', 400, { detail });
+            return;
+          }
+          sendError(res, 'Code308', 400, { detail });
+          return;
+        }
+        sendError(res, 'Code2', 500);
     }
 };

@@ -3,6 +3,37 @@ import { Role, Permission, User } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
 import { flushCache } from '../services/CacheService';
+import { sendSuccess, sendError } from '../utils/response';
+
+export const getRoleNames = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const requester: any = await User.findByPk(req.user?.id, {
+      include: [{ model: Role, through: { attributes: [] } }],
+    });
+    const isSuperAdmin = Boolean(requester?.Roles?.some((r: any) => r.name === 'Super Admin'));
+
+    const roles = await Role.findAll({
+      attributes: ['id', 'name', 'description', 'isSystem'],
+      order: [
+        ['isSystem', 'DESC'],
+        ['name', 'ASC'],
+      ],
+    });
+
+    const formatted = roles
+      .map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        isSystem: r.isSystem,
+      }))
+      .filter((r: any) => (isSuperAdmin ? true : r.name !== 'Super Admin'));
+
+    sendSuccess(res, 'Code1', formatted);
+  } catch (error) {
+    sendError(res, 'Code1100', 500);
+  }
+};
 
 export const getAllRoles = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -34,9 +65,9 @@ export const getAllRoles = async (req: AuthRequest, res: Response): Promise<void
       formattedRoles = formattedRoles.filter(r => r.name !== 'Super Admin');
     }
 
-    res.json(formattedRoles);
+    sendSuccess(res, 'Code1', formattedRoles);
   } catch (error) {
-    res.status(500).json({ message: 'R101' });
+    sendError(res, 'Code1100', 500);
   }
 };
 
@@ -76,12 +107,12 @@ export const getRolesContext = async (req: AuthRequest, res: Response): Promise<
       formattedRoles = formattedRoles.filter((r) => r.name !== 'Super Admin');
     }
 
-    res.json({
+    sendSuccess(res, 'Code1', {
       generatedAt: new Date().toISOString(),
       roles: formattedRoles,
     });
   } catch (error) {
-    res.status(500).json({ message: 'R102' });
+    sendError(res, 'Code1101', 500);
   }
 };
 
@@ -91,7 +122,7 @@ export const createRole = async (req: AuthRequest, res: Response): Promise<void>
 
     const normalizedName = String(name || '').trim().toLowerCase();
     if (normalizedName === 'super admin') {
-      res.status(403).json({ message: 'Cannot create reserved system role: Super Admin' });
+      sendError(res, 'Code1102', 403);
       return;
     }
 
@@ -112,9 +143,9 @@ export const createRole = async (req: AuthRequest, res: Response): Promise<void>
     await logAudit(req.user?.id, 'ROLE_CREATE', null, { name, description, permissions }, getClientIp(req) || undefined);
     flushCache(); // Invalidate permission cache
 
-    res.status(201).json(role);
+    sendSuccess(res, 'Code1103', role, undefined, 201);
   } catch (error) {
-    res.status(500).json({ message: 'R103' });
+    sendError(res, 'Code1104', 500);
   }
 };
 
@@ -125,7 +156,7 @@ export const updateRole = async (req: AuthRequest, res: Response): Promise<void>
 
     const role: any = await Role.findByPk(Number(id), { include: [Permission] });
     if (!role) {
-      res.status(404).json({ message: 'Role not found' });
+      sendError(res, 'Code1105', 404);
       return;
     }
 
@@ -153,9 +184,9 @@ export const updateRole = async (req: AuthRequest, res: Response): Promise<void>
     await logAudit(req.user?.id, 'ROLE_UPDATE', originalData, newData, getClientIp(req) || undefined);
     flushCache(); // Invalidate permission cache
 
-    res.json(role);
+    sendSuccess(res, 'Code1106', role);
   } catch (error) {
-    res.status(500).json({ message: 'R104' });
+    sendError(res, 'Code1107', 500);
   }
 };
 
@@ -165,12 +196,12 @@ export const deleteRole = async (req: AuthRequest, res: Response): Promise<void>
     const role: any = await Role.findByPk(Number(id));
     
     if (!role) {
-      res.status(404).json({ message: 'Role not found' });
+      sendError(res, 'Code1105', 404);
       return;
     }
 
     if (role.isSystem) {
-      res.status(403).json({ message: 'Cannot delete system role' });
+      sendError(res, 'Code1108', 403);
       return;
     }
 
@@ -180,8 +211,8 @@ export const deleteRole = async (req: AuthRequest, res: Response): Promise<void>
     await logAudit(req.user?.id, 'ROLE_DELETE', originalData, null, getClientIp(req) || undefined);
     flushCache(); // Invalidate permission cache
 
-    res.json({ message: 'Role deleted' });
+    sendSuccess(res, 'Code1109');
   } catch (error) {
-    res.status(500).json({ message: 'R105' });
+    sendError(res, 'Code1110', 500);
   }
 };

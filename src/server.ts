@@ -7,6 +7,8 @@ import routes from './routes';
 import sequelize from './config/database';
 import { checkMaintenanceMode } from './middleware/maintenance';
 import { trackLandingEventGif, trackLandingPageViewGif } from './controllers/LandingTrackingController';
+import { generalRateLimit, authRateLimit, uploadRateLimit, trackingRateLimit } from './middleware/rateLimit';
+import { productionErrorHandler, notFoundHandler, setupGlobalErrorHandlers } from './middleware/errorHandler';
 
 dotenv.config();
 
@@ -84,11 +86,23 @@ app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 app.set('trust proxy', 1);
 
 app.use(checkMaintenanceMode);
+
+// 营销页面跟踪速率限制（非常宽松）
+app.use('/lp', trackingRateLimit);
 app.get('/lp/pv.gif', trackLandingPageViewGif);
 app.get('/lp/event.gif', trackLandingEventGif);
 app.post('/lp/pv.gif', trackLandingPageViewGif);
 app.post('/lp/event.gif', trackLandingEventGif);
+
+// API通用速率限制
+app.use('/api', generalRateLimit);
 app.use('/api', routes);
+
+// 404处理 - 必须在所有路由之后
+app.use(notFoundHandler);
+
+// 全局错误处理 - 必须在最后
+app.use(productionErrorHandler);
 
 app.get('/', (req, res) => {
   res.status(403).send(`
@@ -163,14 +177,18 @@ app.get('/', (req, res) => {
 
 const startServer = async () => {
   try {
-    await sequelize.authenticate();
-    console.log('Database connected.');
+    // 设置全局错误处理
+    setupGlobalErrorHandlers();
     
+    await sequelize.authenticate();    
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`📡 Trust proxy: ${app.get('trust proxy')}`);
     });
   } catch (error) {
-    console.error('Unable to connect to the database:', error);
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
   }
 };
 
