@@ -19,6 +19,8 @@ import LandingPage from './LandingPage';
 import LandingPageVisit from './LandingPageVisit';
 import LandingPageEvent from './LandingPageEvent';
 import Product from './Product';
+import Tenant from './Tenant';
+import SubBrand from './SubBrand';
 
 // User - Permission (Direct Many-to-Many - Deprecated but kept for compatibility if needed)
 User.belongsToMany(Permission, { through: UserPermission, foreignKey: 'userId', otherKey: 'permissionId' });
@@ -73,6 +75,15 @@ LandingPage.belongsTo(User, { foreignKey: 'operator_id', as: 'operator', onDelet
 LandingPageVisit.belongsTo(LandingPage, { foreignKey: 'landing_page_id', onDelete: 'CASCADE' });
 LandingPageEvent.belongsTo(LandingPage, { foreignKey: 'landing_page_id', onDelete: 'CASCADE' });
 
+// Tenant - SubBrand (One-to-Many)
+Tenant.hasMany(SubBrand, { foreignKey: 'tenant_id' });
+SubBrand.belongsTo(Tenant, { foreignKey: 'tenant_id' });
+
+// User - Tenant/SubBrand (Many-to-One)
+User.belongsTo(Tenant, { foreignKey: 'tenant_id' });
+User.belongsTo(SubBrand, { foreignKey: 'sub_brand_id' });
+SubBrand.hasMany(User, { foreignKey: 'sub_brand_id' });
+
 export {
   User,
   Permission,
@@ -95,4 +106,6 @@ export {
   LandingPageVisit,
   LandingPageEvent,
   Product,
+  Tenant,
+  SubBrand,
 };

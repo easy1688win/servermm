@@ -8,6 +8,8 @@ class Product extends Model {
   public icon!: string | null;
   public status!: 'active' | 'inactive';
   public vendorFields!: string[] | null;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
 }
 
 Product.init(
@@ -40,6 +42,14 @@ Product.init(
     },
     vendorFields: {
       type: DataTypes.JSON,
+      allowNull: true,
+    },
+    tenant_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    sub_brand_id: {
+      type: DataTypes.INTEGER,
       allowNull: true,
     },
   },

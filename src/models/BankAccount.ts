@@ -9,6 +9,8 @@ class BankAccount extends Model {
   public account_number!: string;
   public total_balance!: number;
   public status!: 'active' | 'inactive' | 'banned';
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
 }
 
 BankAccount.init({
@@ -37,10 +39,22 @@ BankAccount.init({
     type: DataTypes.ENUM('active', 'inactive', 'banned'),
     defaultValue: 'active',
   },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
 }, {
   sequelize,
   modelName: 'BankAccount',
   tableName: 'bank_accounts',
+  indexes: [
+    { fields: ['tenant_id', 'sub_brand_id'] },
+    { fields: ['sub_brand_id', 'status'] },
+  ],
   hooks: {
     beforeCreate: (instance: BankAccount) => {
       if (instance.account_number && !isEncrypted(instance.account_number)) {

@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { Transaction, BankAccount, Player, User, Game, PlayerStats, GameAdjustment, BankCatalog, Product } from '../models';
+import { Transaction, BankAccount, Player, Role, SubBrand, User, Game, PlayerStats, GameAdjustment, BankCatalog, Product } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
 import { logAudit } from '../services/AuditService';
@@ -10,6 +10,7 @@ import { sanitizePlayerForResponse } from './PlayerController';
 import { sanitizeBankAccountForResponse } from './BankAccountController';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
 
 const normalizeIp = (ip: string | null | undefined): string | null => {
 	if (!ip) return null;
@@ -53,17 +54,17 @@ const resolveOperatorName = (op: any): string | null => {
   return rawUsername;
 };
 
-const getPendingReservedWithdrawalByBank = async (tx?: any) => {
+const getPendingReservedWithdrawalByBank = async (tenancy: { tenant_id: number; sub_brand_id: number }, tx?: any) => {
   const rows = (await Transaction.findAll({
     attributes: [
       'bank_account_id',
       [sequelize.fn('SUM', sequelize.col('amount')), 'reserved'],
     ],
-    where: {
+    where: withTenancyWhere(tenancy, {
       status: 'PENDING',
       type: 'WITHDRAWAL',
       bank_account_id: { [Op.ne]: null },
-    },
+    }),
     group: ['bank_account_id'],
     raw: true,
     transaction: tx,
@@ -79,17 +80,17 @@ const getPendingReservedWithdrawalByBank = async (tx?: any) => {
   return map;
 };
 
-const getPendingReservedDepositByGame = async (tx?: any) => {
+const getPendingReservedDepositByGame = async (tenancy: { tenant_id: number; sub_brand_id: number }, tx?: any) => {
   const rows = (await Transaction.findAll({
     attributes: [
       'game_id',
       [sequelize.fn('SUM', sequelize.literal('amount + bonus')), 'reserved'],
     ],
-    where: {
+    where: withTenancyWhere(tenancy, {
       status: 'PENDING',
       type: 'DEPOSIT',
       game_id: { [Op.ne]: null },
-    },
+    }),
     group: ['game_id'],
     raw: true,
     transaction: tx,
@@ -156,6 +157,7 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
 
 export const getTransactions = async (req: AuthRequest, res: Response) => {
   try {
+    const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const scope = (req.query.scope as string | undefined) || null;
 
@@ -165,14 +167,16 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
     }
 
     const transactions = await Transaction.findAll({
-      where,
+      where: withTenancyWhere(tenancy, where),
       include: [
         { 
           model: Player,
-          include: [{ model: Game }]
+          required: false,
+          where: withTenancyWhere(tenancy) as any,
+          include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }]
         },
-        { model: Game },
-        { model: BankAccount },
+        { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
+        { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
         { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] }
       ],
       order: [['created_at', 'DESC']],
@@ -189,6 +193,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
 
 export const getPlayerTransactionHistory = async (req: AuthRequest, res: Response) => {
   try {
+    const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
 
     const playerIdRaw = (req.query.player_id as string | undefined) ?? (req.query.playerId as string | undefined);
@@ -214,8 +219,10 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
 
     const transactions = await Transaction.findAll({
       where: {
-        player_id: playerId,
-        type: { [Op.ne]: 'ADJUSTMENT' },
+        ...withTenancyWhere(tenancy, {
+          player_id: playerId,
+          type: { [Op.ne]: 'ADJUSTMENT' },
+        }),
       },
       include: [
         { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
@@ -252,6 +259,7 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
 
 export const getTransactionsContext = async (req: AuthRequest, res: Response) => {
   try {
+    const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const scope = (req.query.scope as string | undefined) || null;
 
@@ -299,33 +307,33 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       const [transactions, gamesRaw, adjustmentsRaw] = await Promise.all([
         Transaction.findAll({
-          where: txWhere,
+          where: withTenancyWhere(tenancy, txWhere),
           include: [
             {
               model: Player,
-              include: [{ model: Game }],
+              required: false,
+              where: withTenancyWhere(tenancy) as any,
+              include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }],
             },
-            { model: Game },
+            { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
             { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
           ],
           order: [['created_at', 'DESC']],
           limit: 1000,
         } as any),
         Game.findAll({
-          where: { status: 'active' },
+          where: withTenancyWhere(tenancy, { status: 'active' }),
           order: [['name', 'ASC']],
         } as any),
         GameAdjustment.findAll({
-          where: {
-            createdAt: { [Op.between]: [startDate, endDate] },
-          },
+          where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startDate, endDate] } } as any),
           order: [['createdAt', 'DESC']],
         } as any),
       ]);
       
       const allOperators = canViewUsers ? await User.findAll({
         attributes: ['id', 'username', 'full_name'],
-        where: { status: 'active' },
+        where: withTenancyWhere(tenancy, { status: 'active' } as any),
         order: [['username', 'ASC']],
       }) : [];
       
@@ -484,13 +492,52 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         };
       });
 
+      let subBrandOptions: any[] = [];
+      try {
+        const requesterId = req.user?.id;
+        const requester: any = requesterId
+          ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+          : null;
+        if (requester) {
+          const isSuperAdmin =
+            Boolean(req.user?.is_super_admin) ||
+            Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+          const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+          let rows: any[] = [];
+          if (isSuperAdmin) {
+            rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+          } else if (isOperator) {
+            const tid = Number(requester?.tenant_id ?? null);
+            if (Number.isFinite(tid) && tid > 0) {
+              rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+            }
+          } else {
+            const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+            if (Number.isFinite(sbid) && sbid > 0) {
+              rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+            }
+          }
+
+          subBrandOptions = (rows as any[]).map((sb) => ({
+            id: sb.id,
+            tenant_id: (sb as any).tenant_id ?? null,
+            code: (sb as any).code ?? null,
+            name: (sb as any).name ?? null,
+            status: (sb as any).status ?? null,
+          }));
+        }
+      } catch {
+      }
+
       return sendSuccess(res, 'Code1', {
         generatedAt: new Date().toISOString(),
         games,
         gameIconMap,
         transactions: shapedTransactions,
         gameAdjustments,
-        operatorOptions
+        operatorOptions,
+        subBrandOptions,
       });
     }
 
@@ -581,14 +628,16 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       // Fetch base dataset; we'll apply precise filtering in memory (handles decrypted fields)
       const rows = await Transaction.findAll({
-        where,
+        where: withTenancyWhere(tenancy, where),
         include: [
           {
             model: Player,
-            include: [{ model: Game }],
+            required: false,
+            where: withTenancyWhere(tenancy) as any,
+            include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }],
           },
-          { model: Game },
-          { model: BankAccount },
+          { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
+          { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
           { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
         ],
         order: [['created_at', 'DESC']],
@@ -712,15 +761,16 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       });
 
       const [bankAccounts, games, bankCatalog, reservedBankMap, reservedGameMap] = await Promise.all([
-        BankAccount.findAll(),
+        BankAccount.findAll({ where: withTenancyWhere(tenancy) } as any),
         Game.findAll({
+          where: withTenancyWhere(tenancy) as any,
           order: [['name', 'ASC']],
         }),
         BankCatalog.findAll({
           order: [['name', 'ASC']],
         }),
-        getPendingReservedWithdrawalByBank(),
-        getPendingReservedDepositByGame(),
+        getPendingReservedWithdrawalByBank(tenancy),
+        getPendingReservedDepositByGame(tenancy),
       ]);
 
       const shapedBankAccountsFull = (bankAccounts as any[]).map((b) =>
@@ -794,11 +844,13 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       const canViewUsers = userPermissions.includes('action:user_view');
 
-      const allOperators = canViewUsers ? await User.findAll({
-        attributes: ['id', 'username', 'full_name'],
-        where: { status: 'active' },
-        order: [['username', 'ASC']],
-      }) : [];
+      const allOperators = canViewUsers
+        ? await User.findAll({
+            attributes: ['id', 'username', 'full_name'],
+            where: { tenant_id: tenancy.tenant_id, status: 'active' } as any,
+            order: [['username', 'ASC']],
+          } as any)
+        : [];
       
       let operatorOptions: any[] = [];
       if (canViewUsers) {
@@ -809,10 +861,49 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           })
           .filter(Boolean);
       } else if (req.user) {
-         const name = resolveOperatorName(req.user);
-         if (name) {
-            operatorOptions = [{ id: req.user.id, name }];
-         }
+        const name = resolveOperatorName(req.user);
+        if (name) {
+          operatorOptions = [{ id: req.user.id, name }];
+        }
+      }
+
+      let subBrandOptions: any[] = [];
+      try {
+        const requesterId = req.user?.id;
+        const requester: any = requesterId
+          ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+          : null;
+        if (requester) {
+          const isSuperAdmin =
+            Boolean(req.user?.is_super_admin) ||
+            Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+          const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+          let rows: any[] = [];
+          if (isSuperAdmin) {
+            rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+          } else if (isOperator) {
+            const tid = Number(requester?.tenant_id ?? null);
+            if (Number.isFinite(tid) && tid > 0) {
+              rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+            }
+          } else {
+            const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+            if (Number.isFinite(sbid) && sbid > 0) {
+              rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+            }
+          }
+
+          subBrandOptions = (rows as any[]).map((sb) => ({
+            id: sb.id,
+            tenant_id: (sb as any).tenant_id ?? null,
+            code: (sb as any).code ?? null,
+            name: (sb as any).name ?? null,
+            status: (sb as any).status ?? null,
+          }));
+        }
+      } catch (e) {
+        void e;
       }
 
       const shapedBankAccountsWithAvailability = (shapedBankAccountsFull as any[]).map((b: any) => {
@@ -841,6 +932,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           totalPages,
         },
         operatorOptions,
+        subBrandOptions,
       });
       return;
     }
@@ -849,26 +941,28 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
     const [transactions, bankAccounts, games, reservedBankMap, reservedGameMap] = await Promise.all([
       Transaction.findAll({
-        where,
-      include: [
-        {
-          model: Player,
-          include: [{ model: Game }],
-        },
-        { model: Game },
-        { model: BankAccount },
-        { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
-      ],
+        where: withTenancyWhere(tenancy, where),
+        include: [
+          {
+            model: Player,
+            required: false,
+            where: withTenancyWhere(tenancy) as any,
+            include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }],
+          },
+          { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
+          { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
+          { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
+        ],
         order: [['created_at', 'DESC']],
         limit: 5,
       }),
-      BankAccount.findAll(),
+      BankAccount.findAll({ where: withTenancyWhere(tenancy) } as any),
       Game.findAll({
-        where: { status: 'active' },
+        where: withTenancyWhere(tenancy, { status: 'active' }),
         order: [['name', 'ASC']]
       }),
-      getPendingReservedWithdrawalByBank(),
-      getPendingReservedDepositByGame(),
+      getPendingReservedWithdrawalByBank(tenancy),
+      getPendingReservedDepositByGame(tenancy),
     ]);
 
     const txPermissions = userPermissions;
@@ -1025,10 +1119,55 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           }))
         : shapedGamesFull;
 
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
+        : null;
+
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let rows: any[] = [];
+        if (isSuperAdmin) {
+          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (rows as any[]).map((sb) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch (e) {
+      void e;
+    }
+
     sendSuccess(res, 'Code1', {
       transactions: payloadTransactions,
       bankAccounts: payloadBankAccounts,
       games: payloadGames,
+      subBrandOptions,
     });
   } catch (error) {
     sendError(res, 'Code313', 500); // Failed to fetch transaction context
@@ -1042,6 +1181,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
   let ctxGameAccountId: string | null = null;
   try {
     const clientIp = getClientIp(req);
+    const tenancy = getTenancyScopeOrThrow(req);
     const { player_id, bank_account_id, type, amount, game_id, game_account_id } = req.body;
     ctxPlayerId = typeof player_id === 'number' ? player_id : (player_id ? Number(player_id) : null);
     ctxGameId = typeof game_id === 'number' ? game_id : (game_id ? Number(game_id) : null);
@@ -1100,12 +1240,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     const tReserve = await sequelize.transaction();
     let gameUseApi = false;
     try {
-      const bankAccount = type === 'WALVE'
-        ? null
-        : await BankAccount.findByPk(bank_account_id, {
-            transaction: tReserve,
-            lock: tReserve.LOCK.UPDATE,
-          } as any);
+      const bankAccount =
+        type === 'WALVE'
+          ? null
+          : await BankAccount.findOne({
+              where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
+              transaction: tReserve,
+              lock: tReserve.LOCK.UPDATE,
+            } as any);
       if (type !== 'WALVE' && !bankAccount) {
         await tReserve.rollback();
         sendError(res, 'Code306', 400, { detail: 'Bank account not found' });
@@ -1113,7 +1255,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       }
 
       const gameLocked = effectiveGameId
-        ? await Game.findByPk(effectiveGameId as any, {
+        ? await Game.findOne({
+            where: withTenancyWhere(tenancy, { id: effectiveGameId as any } as any),
             transaction: tReserve,
             lock: tReserve.LOCK.UPDATE,
           } as any)
@@ -1127,14 +1270,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       gameUseApi = Boolean((gameLocked as any).use_api);
 
       if (reserveBank > 0 && bankAccount) {
-        const reservedBankMap = await getPendingReservedWithdrawalByBank(tReserve);
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(tenancy, tReserve);
         const reservedExisting = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
         const currentBalance = Number((bankAccount as any).total_balance);
         const available = currentBalance - reservedExisting;
         if (available < reserveBank) balanceError('T903', available);
       }
       if (reserveGame > 0) {
-        const reservedGameMap = await getPendingReservedDepositByGame(tReserve);
+        const reservedGameMap = await getPendingReservedDepositByGame(tenancy, tReserve);
         const reservedExisting = Number(reservedGameMap[(gameLocked as any).id] ?? 0);
         const currentBalance = Number((gameLocked as any).balance);
         const available = currentBalance - reservedExisting;
@@ -1142,7 +1285,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       }
 
       pendingTransaction = await Transaction.create(
-        {
+        withTenancyCreate(tenancy, {
           player_id,
           bank_account_id: type === 'WALVE' ? null : bank_account_id,
           game_id: effectiveGameId,
@@ -1158,7 +1301,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           status: 'PENDING',
           bank_balance_after: null,
           game_balance_after: null,
-        },
+        }),
         { transaction: tReserve },
       );
 
@@ -1171,7 +1314,9 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     const requestId = String(pendingTransaction.id);
 
     if (gameUseApi) {
-      const gameForVendor = effectiveGameId ? await Game.findByPk(effectiveGameId as any) : null;
+      const gameForVendor = effectiveGameId
+        ? await Game.findOne({ where: withTenancyWhere(tenancy, { id: effectiveGameId as any } as any) } as any)
+        : null;
       const vendor = gameForVendor ? await VendorFactory.getServiceByGame((gameForVendor as any).id) : null;
       if (vendor) {
         if (!game_account_id || typeof game_account_id !== 'string') {
@@ -1247,7 +1392,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     try {
       const bankAccount = type === 'WALVE'
         ? null
-        : await BankAccount.findByPk(bank_account_id, {
+        : await BankAccount.findOne({
+            where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
             transaction: tFinal,
             lock: tFinal.LOCK.UPDATE,
           } as any);
@@ -1255,13 +1401,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         throw new Error('Bank account not found');
       }
 
-      const player = await Player.findByPk(player_id, { transaction: tFinal });
+      const player = await Player.findOne({ where: withTenancyWhere(tenancy, { id: player_id } as any), transaction: tFinal } as any);
       if (!player) {
         throw new Error('Player not found');
       }
 
       const gameLocked = effectiveGameId
-        ? await Game.findByPk(effectiveGameId, {
+        ? await Game.findOne({
+            where: withTenancyWhere(tenancy, { id: effectiveGameId } as any),
             transaction: tFinal,
             lock: tFinal.LOCK.UPDATE,
           } as any)
@@ -1271,7 +1418,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       }
 
       if (reserveBank > 0 && bankAccount) {
-        const reservedBankMap = await getPendingReservedWithdrawalByBank(tFinal);
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(tenancy, tFinal);
         const reservedAll = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
         const reservedOther = reservedAll - reserveBank;
         const total = Number((bankAccount as any).total_balance);
@@ -1279,7 +1426,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         if (next < reservedOther) balanceError('T903', total - reservedAll);
       }
       if (reserveGame > 0) {
-        const reservedGameMap = await getPendingReservedDepositByGame(tFinal);
+        const reservedGameMap = await getPendingReservedDepositByGame(tenancy, tFinal);
         const reservedAll = Number(reservedGameMap[(gameLocked as any).id] ?? 0);
         const reservedOther = reservedAll - reserveGame;
         const total = Number((gameLocked as any).balance);
@@ -1447,9 +1594,10 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
 
         if (msgLower.includes('suspended')) {
           try {
+            const fallbackTenancy = getTenancyScopeOrThrow(req);
             const [playerForSync, gameForSync] = await Promise.all([
-              ctxPlayerId ? Player.findByPk(ctxPlayerId) : Promise.resolve(null),
-              ctxGameId ? Game.findByPk(ctxGameId) : Promise.resolve(null),
+              ctxPlayerId ? Player.findOne({ where: withTenancyWhere(fallbackTenancy, { id: ctxPlayerId } as any) } as any) : Promise.resolve(null),
+              ctxGameId ? Game.findOne({ where: withTenancyWhere(fallbackTenancy, { id: ctxGameId } as any) } as any) : Promise.resolve(null),
             ]);
             const meta = (playerForSync as any)?.metadata;
             const gameName = (gameForSync as any)?.name;
@@ -1483,6 +1631,7 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
   const t = await sequelize.transaction();
   try {
     const clientIp = getClientIp(req);
+    const tenancy = getTenancyScopeOrThrow(req);
     const id = String(req.params.id);
     const userPermissions = req.user?.permissions || [];
 
@@ -1492,7 +1641,7 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const transaction = await Transaction.findByPk(id, { transaction: t } as any);
+    const transaction = await Transaction.findOne({ where: withTenancyWhere(tenancy, { id } as any), transaction: t } as any);
     if (!transaction) {
       await t.rollback();
       sendError(res, 'Code315', 404); // Transaction not found
@@ -1542,8 +1691,13 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
     const t = await sequelize.transaction();
     try {
 				const clientIp = getClientIp(req);
+        const tenancy = getTenancyScopeOrThrow(req);
         const { id } = req.params;
-        const transaction = await Transaction.findByPk(Number(id), { transaction: t, lock: t.LOCK.UPDATE } as any);
+        const transaction = await Transaction.findOne({
+          where: withTenancyWhere(tenancy, { id: Number(id) } as any),
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        } as any);
         
         if (!transaction) {
             throw new Error('Transaction not found');
@@ -1555,17 +1709,25 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         const bankAccountId = transaction.bank_account_id as number | null;
         const bankAccount = transaction.type === 'WALVE' || bankAccountId == null
           ? null
-          : await BankAccount.findByPk(bankAccountId, { transaction: t, lock: t.LOCK.UPDATE } as any);
+          : await BankAccount.findOne({
+              where: withTenancyWhere(tenancy, { id: bankAccountId } as any),
+              transaction: t,
+              lock: t.LOCK.UPDATE,
+            } as any);
         if (transaction.type !== 'WALVE' && !bankAccount) throw new Error('Bank Account not found');
 
         const player = transaction.player_id
-          ? await Player.findByPk(transaction.player_id, { transaction: t })
+          ? await Player.findOne({ where: withTenancyWhere(tenancy, { id: transaction.player_id } as any), transaction: t } as any)
           : null;
 
         let game: any | null = null;
         const effectiveGameId = (transaction as any).game_id || null;
         if (effectiveGameId) {
-          game = await Game.findByPk(effectiveGameId, { transaction: t, lock: t.LOCK.UPDATE } as any);
+          game = await Game.findOne({
+            where: withTenancyWhere(tenancy, { id: effectiveGameId } as any),
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+          } as any);
         }
 
         const amount = Number(transaction.amount);
@@ -1573,8 +1735,8 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         const walve = Number((transaction as any).walve || 0);
         const tips = Number((transaction as any).tips || 0);
 
-        const reservedBankMap = await getPendingReservedWithdrawalByBank(t);
-        const reservedGameMap = await getPendingReservedDepositByGame(t);
+        const reservedBankMap = await getPendingReservedWithdrawalByBank(tenancy, t);
+        const reservedGameMap = await getPendingReservedDepositByGame(tenancy, t);
         const fmt = (n: number) => `$${Number(n).toFixed(2)}`;
         const insufficientFundsDetail = (available: number) => `Insufficient Funds ${fmt(available)}`;
         const balanceError = (code: 'T903' | 'T904', available: number) => {

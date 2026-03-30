@@ -5,12 +5,14 @@ import { BankAccount, Player, Transaction, User, Game, BankCatalog } from '../mo
 import { getCache, setCache } from '../services/CacheService';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 
 export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
   try {
+    const tenancy = getTenancyScopeOrThrow(req);
     const userId = req.user?.id || 0;
     const permissions = req.user?.permissions || [];
-    const cacheKey = `dashboard:summary:${userId}`;
+    const cacheKey = `dashboard:summary:${userId}:${tenancy.tenant_id}:${tenancy.sub_brand_id}`;
 
     const cached = getCache(cacheKey);
     if (cached) {
@@ -27,24 +29,24 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     const canViewFinancials = permissions.includes('view:dashboard_financials');
 
     const [banksResult, playersResult, transactionsResult, gamesResult, bankCatalogResult] = await Promise.allSettled([
-      BankAccount.findAll(),
+      BankAccount.findAll({ where: withTenancyWhere(tenancy) } as any),
       Player.findAll({
         attributes: ['id', 'player_game_id', 'createdAt'],
-        where: { createdAt: { [Op.between]: [startOfDay, endOfDay] } },
+        where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startOfDay, endOfDay] } }),
       } as any),
       Transaction.findAll({
-        where: { created_at: { [Op.between]: [startOfDay, endOfDay] } },
+        where: withTenancyWhere(tenancy, { created_at: { [Op.between]: [startOfDay, endOfDay] } }),
         include: [
-          { model: BankAccount },
-          { model: Player },
-          { model: Game },
+          { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
+          { model: Player, required: false, where: withTenancyWhere(tenancy) as any },
+          { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
           { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
         ],
         order: [['created_at', 'DESC']],
         limit: 500,
       } as any),
       Game.findAll({
-        where: { status: 'active' },
+        where: withTenancyWhere(tenancy, { status: 'active' }),
       } as any),
       BankCatalog.findAll({
         order: [['name', 'ASC']]
@@ -385,6 +387,54 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         };
       });
 
+    // Build sub brand options for FE
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, { include: [] } as any)
+        : null;
+      const userRoles = (req.user as any)?.Roles || requester?.Roles || [];
+      const isSuperAdmin =
+        Boolean(req.user?.is_super_admin) ||
+        Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+      const isOperator = Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+      const { SubBrand } = await import('../models');
+      if (isSuperAdmin) {
+        const rows = await SubBrand.findAll({ order: [['id', 'ASC']] } as any);
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      } else if (isOperator) {
+        const tid = Number(req.user?.tenant_id ?? null);
+        if (Number.isFinite(tid) && tid > 0) {
+          const rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] } as any);
+          subBrandOptions = (rows as any[]).map((sb: any) => ({
+            id: sb.id,
+            tenant_id: (sb as any).tenant_id ?? null,
+            code: (sb as any).code ?? null,
+            name: (sb as any).name ?? null,
+            status: (sb as any).status ?? null,
+          }));
+        }
+      } else if (Number.isFinite(req.user?.sub_brand_id)) {
+        const rows = await SubBrand.findAll({ where: { id: req.user?.sub_brand_id } as any, order: [['id', 'ASC']] } as any);
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch {
+    }
+
     const summary = {
       generatedAt: now.toISOString(),
       stats: finalStats,
@@ -392,6 +442,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       kioskReports,
       staffPerformance,
       recentTransactions,
+      subBrandOptions,
       partialErrors: {
         banks: banksResult.status === 'rejected',
         players: playersResult.status === 'rejected',

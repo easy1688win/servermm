@@ -15,12 +15,15 @@ import dashboardRoutes from './dashboardRoutes';
 import utilityRoutes from './utilityRoutes';
 import landingPageRoutes from './landingPageRoutes';
 import productRoutes from './productRoutes';
+import tenantRoutes from './tenantRoutes';
+import subBrandRoutes from './subBrandRoutes';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 import { getMaintenanceStatus } from '../middleware/maintenance';
-import { AuditLog, User } from '../models';
+import { AuditLog, Role, SubBrand, User } from '../models';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 
 const router = Router();
 
@@ -39,6 +42,8 @@ router.use('/settings', settingRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/utility', utilityRoutes);
 router.use('/landing-pages', landingPageRoutes);
+router.use('/tenants', tenantRoutes);
+router.use('/sub-brands', subBrandRoutes);
 
 router.get('/maintenance', getMaintenanceStatus);
 
@@ -86,6 +91,7 @@ router.get(
 		}
 
 		const user = req.user;
+		const tenancy = getTenancyScopeOrThrow(req);
 		const permissions = (user?.permissions || []) as string[];
 		const canViewAll = permissions.includes('view:audit_logs');
 		const canViewSensitive = permissions.includes('view:sensitive_logs');
@@ -94,6 +100,7 @@ router.get(
 		if (!canViewAll && user) {
 			where.userId = user.id;
 		}
+		where = withTenancyWhere(tenancy, where);
 
 		const [logs, allOperators] = await Promise.all([
 			AuditLog.findAll({
@@ -182,7 +189,47 @@ router.get(
 			}
 		}
 
-		sendSuccess(res, 'Code1', { logs: payload, operatorOptions });
+		let subBrandOptions: any[] = [];
+		try {
+			if (user?.id) {
+				const requester: any = await User.findByPk(user.id, {
+					attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id'],
+					include: [{ model: Role, through: { attributes: [] }, required: false }],
+				} as any);
+				if (requester) {
+					const isSuperAdmin =
+						Boolean((user as any).is_super_admin) ||
+						Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+					const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+					let rows: any[] = [];
+					if (isSuperAdmin) {
+						rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+					} else if (isOperator) {
+						const tid = Number(requester?.tenant_id ?? null);
+						if (Number.isFinite(tid) && tid > 0) {
+							rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+						}
+					} else {
+						const sbid = Number((user as any).sub_brand_id ?? requester?.sub_brand_id ?? null);
+						if (Number.isFinite(sbid) && sbid > 0) {
+							rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+						}
+					}
+
+					subBrandOptions = (rows as any[]).map((sb) => ({
+						id: sb.id,
+						tenant_id: (sb as any).tenant_id ?? null,
+						code: (sb as any).code ?? null,
+						name: (sb as any).name ?? null,
+						status: (sb as any).status ?? null,
+					}));
+				}
+			}
+		} catch {
+		}
+
+		sendSuccess(res, 'Code1', { logs: payload, operatorOptions, subBrandOptions });
 	} catch (error) {
 		sendError(res, 'Code320', 500);
 	}

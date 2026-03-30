@@ -3,6 +3,7 @@ import archiver from 'archiver';
 import { LandingPage } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 
 const getTrackingBaseUrl = (req: AuthRequest): string => {
   const raw = (process.env.LANDING_TRACK_BASE_URL || '').trim();
@@ -589,7 +590,8 @@ export const downloadLandingDistZip = async (req: AuthRequest, res: Response): P
     return;
   }
 
-  const page = await LandingPage.findByPk(id);
+  const scope = getTenancyScopeOrThrow(req);
+  const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
   if (!page) {
     sendError(res, 'LP105', 404);
     return;

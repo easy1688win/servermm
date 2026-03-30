@@ -5,6 +5,8 @@ import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
 class Player extends Model {
   public id!: number;
   public player_game_id!: string;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
   public tags!: any;
   public metadata!: any;
   public total_in!: number;
@@ -20,7 +22,14 @@ Player.init({
   player_game_id: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
+  },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
   },
   tags: {
     type: DataTypes.JSON,
@@ -34,6 +43,10 @@ Player.init({
   sequelize,
   modelName: 'Player',
   tableName: 'players',
+  indexes: [
+    { unique: true, fields: ['sub_brand_id', 'player_game_id'] },
+    { fields: ['tenant_id', 'sub_brand_id'] },
+  ],
   hooks: {
     beforeCreate: (instance: Player) => {
       if (instance.metadata) {

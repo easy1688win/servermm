@@ -6,6 +6,8 @@ import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
 class GameAdjustment extends Model {
   public id!: number;
   public game_id!: number;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
   public operator_id!: number;
   public amount!: number;
   public type!: 'TOPUP' | 'OUT';
@@ -28,6 +30,14 @@ GameAdjustment.init({
       model: Game,
       key: 'id',
     },
+  },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
   },
   operator_id: {
     type: DataTypes.INTEGER,
@@ -61,6 +71,11 @@ GameAdjustment.init({
   sequelize,
   modelName: 'GameAdjustment',
   tableName: 'game_adjustments',
+  indexes: [
+    { fields: ['tenant_id', 'sub_brand_id'] },
+    { fields: ['sub_brand_id', 'createdAt'] },
+    { fields: ['game_id', 'createdAt'] },
+  ],
   hooks: {
     beforeCreate: (instance: GameAdjustment) => {
       if (instance.reason && !isEncrypted(instance.reason)) {

@@ -4,6 +4,8 @@ import sequelize from '../config/database';
 class PlayerStats extends Model {
   public id!: number;
   public player_id!: number;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
   public date!: string;
   public deposit_count!: number;
   public withdraw_count!: number;
@@ -26,6 +28,14 @@ PlayerStats.init(
     player_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
+    },
+    tenant_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    sub_brand_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
     },
     date: {
       type: DataTypes.DATEONLY,
@@ -83,9 +93,10 @@ PlayerStats.init(
       {
         fields: ['player_id', 'date'],
       },
+      { fields: ['tenant_id', 'sub_brand_id'] },
+      { fields: ['sub_brand_id', 'date'] },
     ],
   },
 );
 
 export default PlayerStats;
-

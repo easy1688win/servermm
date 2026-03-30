@@ -1,11 +1,12 @@
 import { Request, Response } from 'express';
-import { Game, GameAdjustment, Product, Transaction } from '../models';
+import { Game, GameAdjustment, Product, Role, SubBrand, Transaction, User } from '../models';
 import { logAudit } from '../services/AuditService';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
 import { decrypt, encrypt, isEncrypted } from '../utils/encryption';
 import { VendorFieldDef, getVendorFieldDefsFromKeys, isAllowedVendorFieldKey } from '../vendors/vendorFieldRegistry';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
 
 const isValidUrl = (url: string): boolean => {
   if (!url) return true; // Allow empty/null URLs
@@ -195,10 +196,11 @@ const maskVendorConfigForResponse = (
 
 export const getAllGames = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const canViewGames = (userPermissions as string[]).includes('view:games');
     const games = await Game.findAll({
-      where: { status: 'active' },
+      where: withTenancyWhere(scope, { status: 'active' }),
       order: [['name', 'ASC']]
     });
     const formatted = games.map(g => ({
@@ -219,16 +221,17 @@ export const getAllGames = async (req: AuthRequest, res: Response): Promise<void
 
 export const getGamesContext = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     await ensureGamesSynced();
     const userPermissions = req.user?.permissions || [];
     const canViewGames = (userPermissions as string[]).includes('view:games');
     const [games, products] = await Promise.all([
       Game.findAll({
-        where: { status: 'active' },
+        where: withTenancyWhere(scope, { status: 'active' }),
         order: [['name', 'ASC']],
       }),
       Product.findAll({
-        where: { status: 'active' },
+        where: { status: 'active' } as any,
         order: [['provider', 'ASC']],
       }),
     ]);
@@ -267,10 +270,34 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
       };
     });
 
+    let subBrands: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester = requesterId
+        ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+        : null;
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'super admin'));
+        const isOperator = Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'operator'));
+        if (isSuperAdmin) {
+          subBrands = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number((requester as any)?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            subBrands = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        }
+      }
+    } catch {
+    }
+
     sendSuccess(res, 'Code1', {
       generatedAt: new Date().toISOString(),
       games: formattedGames,
       products: formattedProducts,
+      subBrands,
     });
   } catch (error) {
     console.error('Error fetching games context:', error);
@@ -280,6 +307,7 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
 
 export const createGame = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     await ensureGamesSynced();
     const { balance, kioskUrl, kioskUsername, kioskPassword } = req.body;
     const productId = req.body?.productId !== undefined ? Number(req.body.productId) : null;
@@ -307,8 +335,8 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
     const derivedIcon = resolvedProduct.icon || null;
 
     const existing = await Game.findOne({
-      where: { name: trimmedName },
-    });
+      where: withTenancyWhere(scope, { name: trimmedName }),
+    } as any);
 
     if (existing) {
       if (existing.status === 'inactive') {
@@ -411,7 +439,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
       maskedVendorConfig = maskVendorConfigForResponse(vendorFields, storedVendorConfig);
     }
 
-    const game = await Game.create({
+    const game = await Game.create(withTenancyCreate(scope, {
       name: trimmedName,
       balance: balance || 0,
       icon: derivedIcon,
@@ -422,7 +450,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
       vendor_config: storedVendorConfig,
       use_api: useApi,
       status: 'active'
-    });
+    }));
     await logAudit(
       req.user?.id || null,
       'GAME_CREATE',
@@ -461,8 +489,9 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
 
 export const deleteGame = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { id } = req.params;
-    const game = await Game.findByPk(Number(id));
+    const game = await Game.findOne({ where: withTenancyWhere(scope, { id: Number(id) }) } as any);
     
     if (!game) {
       sendError(res, 'Code1008', 404); // Game not found
@@ -513,6 +542,7 @@ export const deleteGame = async (req: AuthRequest, res: Response): Promise<void>
 
 export const update = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     await ensureGamesSynced();
     const { id } = req.params;
     const { kioskUrl, kioskUsername, kioskPassword } = req.body;
@@ -520,7 +550,7 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
     const nextVendorConfigRaw = req.body?.vendorConfig;
     const nextUseApiRaw = req.body?.useApi;
     
-    const game = await Game.findByPk(Number(id));
+    const game = await Game.findOne({ where: withTenancyWhere(scope, { id: Number(id) }) } as any);
     if (!game) {
       sendError(res, 'Code1008', 404); // Game not found
       return;
@@ -666,6 +696,7 @@ export const update = async (req: AuthRequest, res: Response): Promise<void> => 
 export const adjustBalance = async (req: AuthRequest, res: Response): Promise<void> => {
   const t = await sequelize.transaction();
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const hasGameOperational = (userPermissions as string[]).includes('action:game_operational');
     
@@ -680,7 +711,8 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     const clientIp = getClientIp(req);
     const operatorId = req.user?.id;
 
-    const game = await Game.findByPk(Number(id), {
+    const game = await Game.findOne({
+      where: withTenancyWhere(scope, { id: Number(id) }),
       transaction: t,
       lock: t.LOCK.UPDATE,
     } as any);
@@ -695,7 +727,7 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     const adjustmentAmount = Number(amount);
     const reservedRow = (await Transaction.findOne({
       attributes: [[sequelize.fn('SUM', sequelize.literal('amount + bonus')), 'reserved']],
-      where: { status: 'PENDING', type: 'DEPOSIT', game_id: (game as any).id },
+      where: withTenancyWhere(scope, { status: 'PENDING', type: 'DEPOSIT', game_id: (game as any).id }),
       raw: true,
       transaction: t,
     } as any)) as any;
@@ -728,16 +760,19 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
     const operatorName =
       (req.user && (req.user.full_name || req.user.username)) || 'Unknown';
 
-    await GameAdjustment.create({
-      game_id: game.id,
-      operator_id: operatorId,
-      amount: adjustmentAmount,
-      type,
-      reason,
-      operator: operatorName,
-      game_balance_after: afterBalance,
-      ip_address: clientIp,
-    }, { transaction: t });
+    await GameAdjustment.create(
+      withTenancyCreate(scope, {
+        game_id: game.id,
+        operator_id: operatorId,
+        amount: adjustmentAmount,
+        type,
+        reason,
+        operator: operatorName,
+        game_balance_after: afterBalance,
+        ip_address: clientIp,
+      }),
+      { transaction: t } as any,
+    );
 
     await t.commit();
     await logAudit(req.user?.id || null, 'GAME_ADJUST', { id: game.id, beforeBalance, afterBalance, amount: adjustmentAmount, type, reason }, { id: game.id, balance: afterBalance, kioskUrl: game.kioskUrl, kioskUsername: game.kioskUsername, kioskPassword: game.kioskPassword }, clientIp || undefined);
@@ -751,9 +786,11 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
 
 export const getGameAdjustments = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const canViewSensitive = (userPermissions as string[]).includes('view:sensitive_logs');
     const adjustments = await GameAdjustment.findAll({
+      where: withTenancyWhere(scope) as any,
       order: [['createdAt', 'DESC']]
     });
 

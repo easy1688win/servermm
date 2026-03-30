@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Op } from 'sequelize';
-import { User, Permission, Role, Setting } from '../models';
+import { User, Permission, Role, Setting, SubBrand, Tenant } from '../models';
 import { logAudit } from '../services/AuditService';
 import crypto from 'crypto';
 import sequelize from '../config/database';
@@ -557,7 +557,19 @@ const denyMaintenance = (res: Response, settings: MaintenanceGateSettings) => {
 export const login = async (req: Request, res: Response): Promise<void> => {
   try {
 	const clientIp = getClientIp(req);
-    const { username, password, deviceId, deviceName } = req.body;
+    const { prefix, username, password, deviceId, deviceName } = req.body;
+
+    const rawPrefix = typeof prefix === 'string' ? prefix.trim() : '';
+    if (!rawPrefix) {
+      sendError(res, 'Code231', 400);
+      return;
+    }
+
+    const subBrand = await SubBrand.findOne({ where: { code: rawPrefix, status: 'active' } as any });
+    if (!subBrand) {
+      sendError(res, 'Code232', 404);
+      return;
+    }
 
     const user: any = await User.findOne({ 
       where: { username },
@@ -617,6 +629,22 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       await logAudit(user.id, 'LOGIN_BLOCKED', { reason: 'Account locked' }, null, clientIp || undefined);
       sendError(res, 'Code105', 403);
       return;
+    }
+
+    const isSuperAdmin = Boolean(user.is_super_admin) || Boolean(user?.Roles?.some((r: any) => r?.name === 'Super Admin'));
+    if (!isSuperAdmin) {
+      const userSubBrandId = Number(user.sub_brand_id);
+      if (!Number.isFinite(userSubBrandId) || userSubBrandId !== subBrand.id) {
+        await logAudit(
+          user.id,
+          'LOGIN_BLOCKED',
+          { username, reason: 'Prefix sub brand mismatch', prefix: rawPrefix },
+          null,
+          clientIp || undefined,
+        );
+        sendError(res, 'Code233', 403);
+        return;
+      }
     }
 
     const now = Date.now();
@@ -721,6 +749,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         id: user.id,
         username: user.username,
         stage,
+        prefix: rawPrefix,
         deviceId: effectiveDeviceId,
         deviceName: typeof deviceName === 'string' && deviceName.trim().length > 0 ? deviceName.trim().slice(0, 191) : null
       },
@@ -962,36 +991,47 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
     }
 
     // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
+    const user = await User.findByPk(userId, {
+      include: [{ model: Role, through: { attributes: [] }, required: false }],
+    } as any);
 
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    const roles = ((user as any)?.Roles || []) as any[];
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      roles.some((r) => String(r?.name).toLowerCase() === 'super admin');
+    const isOperator = roles.some((r) => String(r?.name).toLowerCase() === 'operator');
 
-    let targetUserId = userId;
-    
-    // If Super Admin, they can view all sessions (no user filter)
+    const requesterTenantId = (user as any)?.tenant_id ?? null;
+    let allowedUserIds: number[] | null = [userId];
     if (isSuperAdmin) {
-      targetUserId = undefined; // Will not filter by user_id
+      allowedUserIds = null;
+    } else if (isOperator && requesterTenantId) {
+      const tenantUsers = await User.findAll({
+        where: { tenant_id: requesterTenantId } as any,
+        attributes: ['id'],
+      } as any);
+      allowedUserIds = (tenantUsers as any[]).map((u) => Number(u.id)).filter((id) => Number.isFinite(id));
+      if (allowedUserIds.length === 0) {
+        allowedUserIds = [userId];
+      }
     }
 
     // We want to return user+device combinations, not aggregated by device
     // 1. Find all active sessions for this user (or all users if Super Admin)
-    const sessionWhere = targetUserId ? { user_id: targetUserId, is_active: true } : { is_active: true };
+    const sessionWhere =
+      allowedUserIds === null
+        ? { is_active: true }
+        : { user_id: { [Op.in]: allowedUserIds }, is_active: true };
     const activeSessions = await UserSession.findAll({
       where: sessionWhere,
       order: [['createdAt', 'DESC']],
     });
 
     // 2. Find all locks for this user (or all users if Super Admin)
-    const lockWhere = targetUserId ? { user_id: targetUserId } : {};
+    const lockWhere =
+      allowedUserIds === null
+        ? {}
+        : { user_id: { [Op.in]: allowedUserIds } };
     const userLocks = await UserDeviceLock.findAll({
       where: lockWhere
     });
@@ -1022,7 +1062,8 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
 
     const users = await User.findAll({
       where: { id: { [Op.in]: Array.from(userIds) } },
-      attributes: ['id', 'username', 'full_name']
+      attributes: ['id', 'username', 'full_name', 'tenant_id'],
+      include: [{ model: Tenant, attributes: ['id', 'prefix', 'name'], required: false }],
     });
 
     const userMap = new Map<number, typeof users[number]>();
@@ -1033,9 +1074,10 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
     // 5. Get the latest session info for each user+device combination
     const allRelevantSessions = await UserSession.findAll({
       where: {
-        [Op.or]: [
-          { device_id: { [Op.in]: Array.from(deviceIds) } }
-        ]
+        [Op.and]: [
+          { user_id: { [Op.in]: Array.from(userIds) } },
+          { device_id: { [Op.in]: Array.from(deviceIds) } },
+        ],
       },
       order: [['createdAt', 'DESC']],
     });
@@ -1101,6 +1143,9 @@ export const getMySessions = async (req: AuthRequest, res: Response): Promise<vo
         id: session?.id || 0, // Use 0 for lock-only records, frontend will handle
         user_id: userId,
         username: userInfo.username,
+        tenant_id: (userInfo as any).tenant_id ?? null,
+        tenant_name: (userInfo as any).Tenant?.name ?? null,
+        tenant_prefix: (userInfo as any).Tenant?.prefix ?? null,
         device_id: deviceId,
         device_name: session ? deriveDeviceNameFromUserAgent(session.user_agent) : 'Unknown Device',
         user_agent: session?.user_agent || null,
@@ -1479,7 +1524,17 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
         {
           model: Role,
           include: [Permission]
-        }
+        },
+        {
+          model: Tenant,
+          attributes: ['id', 'prefix', 'name'],
+          required: false,
+        },
+        {
+          model: SubBrand,
+          attributes: ['id', 'tenant_id', 'code', 'name', 'status'],
+          required: false,
+        },
       ]
     });
 
@@ -1521,6 +1576,13 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
       currency: user.currency,
       roles: user.Roles ? user.Roles.map((r: any) => r.name) : [],
       permissions: permissionCodes,
+      tenant_id: user.tenant_id ?? null,
+      tenant_name: user.Tenant?.name ?? null,
+      tenant_prefix: user.Tenant?.prefix ?? null,
+      sub_brand_id: user.sub_brand_id ?? null,
+      sub_brand_name: user.SubBrand?.name ?? null,
+      sub_brand_code: user.SubBrand?.code ?? null,
+      is_super_admin: Boolean(req.user?.is_super_admin),
       ap: user.api_key || null
     });
   } catch (error) {

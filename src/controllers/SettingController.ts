@@ -1,25 +1,13 @@
 import { Response } from 'express';
-import { Setting } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow } from '../tenancy/scope';
+import { isGlobalSettingKey, listSettings, setSettingValue, getSettingValue } from '../services/SettingService';
 
 export const getAll = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const settings = await Setting.findAll();
-    const result: Record<string, any> = {};
-    settings.forEach((s: any) => {
-      // Handle potential double-encoding or stringified JSON from DB
-      let val = s.value;
-      if (typeof val === 'string' && (val.startsWith('[') || val.startsWith('{'))) {
-        try {
-          const parsed = JSON.parse(val);
-          val = parsed;
-        } catch (e) {
-          // ignore
-        }
-      }
-      result[s.key] = val;
-    });
+    const scope = getTenancyScopeOrThrow(req);
+    const result = await listSettings(scope);
     sendSuccess(res, 'Code1', result);
   } catch (error) {
     sendError(res, 'Code437', 500); // Error fetching settings
@@ -28,16 +16,11 @@ export const getAll = async (req: AuthRequest, res: Response): Promise<void> => 
 
 export const getByKey = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const rawKey = req.params.key;
     const key = Array.isArray(rawKey) ? rawKey[0] : rawKey;
-    const setting = await Setting.findByPk(key);
-
-    if (!setting) {
-      sendSuccess(res, 'Code1', null);
-      return;
-    }
-
-    sendSuccess(res, 'Code1', setting.value);
+    const value = await getSettingValue(scope, key);
+    sendSuccess(res, 'Code1', value);
   } catch (error) {
     sendError(res, 'Code438', 500); // Error fetching setting by key
   }
@@ -45,6 +28,7 @@ export const getByKey = async (req: AuthRequest, res: Response): Promise<void> =
 
 export const setByKey = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const rawKey = req.params.key;
     const key = Array.isArray(rawKey) ? rawKey[0] : rawKey;
     const { value } = req.body;
@@ -63,17 +47,8 @@ export const setByKey = async (req: AuthRequest, res: Response): Promise<void> =
              return;
         }
     }
-    
-    const [setting, created] = await Setting.findOrCreate({
-      where: { key },
-      defaults: { value }
-    });
 
-    if (!created) {
-      setting.value = value;
-      await setting.save();
-    }
-
+    const setting = await setSettingValue(scope, key, value);
     sendSuccess(res, 'Code1', setting);
   } catch (error) {
     sendError(res, 'Code441', 500); // Error setting by key
@@ -82,6 +57,7 @@ export const setByKey = async (req: AuthRequest, res: Response): Promise<void> =
 
 export const updateSettings = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const settingsObj = req.body;
     
     if (!settingsObj || typeof settingsObj !== 'object') {
@@ -107,18 +83,8 @@ export const updateSettings = async (req: AuthRequest, res: Response): Promise<v
         }
       }
 
-      const [setting, created] = await Setting.findOrCreate({
-        where: { key },
-        defaults: { key, value }
-      });
-
-      if (!created && setting.value !== value) {
-        setting.value = value;
-        await setting.save();
-        updates.push(setting);
-      } else if (created) {
-        updates.push(setting);
-      }
+      const setting = await setSettingValue(scope, key, value);
+      updates.push(setting);
     }
 
     if (updates.length > 0) {
@@ -130,4 +96,3 @@ export const updateSettings = async (req: AuthRequest, res: Response): Promise<v
     sendError(res, 'Code441', 500); // Error updating settings
   }
 };
-

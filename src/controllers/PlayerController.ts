@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { Player, Game, BankCatalog, Setting, User, PlayerStats, Product } from '../models';
+import { Player, Game, BankCatalog, Role, Setting, SubBrand, User, PlayerStats, Product } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
 import { VendorFactory } from '../services/vendor/VendorFactory';
@@ -8,6 +8,9 @@ import sequelize from '../config/database';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { randomBytes } from 'crypto';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
+import { getSettingValue } from '../services/SettingService';
+import { getCache, setCache } from '../services/CacheService';
 
 const resolveOperatorName = (op: any): string | null => {
   if (!op || typeof op !== 'object') return null;
@@ -130,12 +133,14 @@ const validateMetadata = (metadata: any): string | null => {
 
 const checkGlobalPhoneNumberConflict = async (
   phoneNumber: string,
+  scope: { tenant_id: number; sub_brand_id: number },
   excludePlayerId?: number
 ): Promise<string | null> => {
   if (!phoneNumber) return null;
 
   const players = await Player.findAll({
     attributes: ['id', 'metadata'],
+    where: withTenancyWhere(scope),
   });
 
   for (const p of players) {
@@ -156,12 +161,14 @@ const checkGlobalPhoneNumberConflict = async (
 const checkGlobalMetadataConflicts = async (
   bankKeys: Set<string>,
   gameKeys: Set<string>,
+  scope: { tenant_id: number; sub_brand_id: number },
   excludePlayerId?: number
 ): Promise<string | null> => {
   if (bankKeys.size === 0 && gameKeys.size === 0) return null;
 
   const players = await Player.findAll({
     attributes: ['id', 'player_game_id', 'metadata'],
+    where: withTenancyWhere(scope),
   });
 
   const bankKeyArr = Array.from(bankKeys);
@@ -193,24 +200,28 @@ const checkGlobalMetadataConflicts = async (
   return null;
 };
 
-const validateMetadataGlobalForCreate = async (metadata: any): Promise<string | null> => {
+const validateMetadataGlobalForCreate = async (
+  metadata: any,
+  scope: { tenant_id: number; sub_brand_id: number },
+): Promise<string | null> => {
   if (!metadata) return null;
   
   // Check Phone Number uniqueness
   const phoneNumber = extractPhoneNumber(metadata);
   if (phoneNumber) {
-    const phoneConflict = await checkGlobalPhoneNumberConflict(phoneNumber);
+    const phoneConflict = await checkGlobalPhoneNumberConflict(phoneNumber, scope);
     if (phoneConflict) return phoneConflict;
   }
   
   const bankKeys = extractBankKeys(metadata);
   const gameKeys = extractGameKeys(metadata);
-  return checkGlobalMetadataConflicts(bankKeys, gameKeys);
+  return checkGlobalMetadataConflicts(bankKeys, gameKeys, scope);
 };
 
 const validateMetadataGlobalForUpdate = async (
   newMetadata: any,
   oldMetadata: any,
+  scope: { tenant_id: number; sub_brand_id: number },
   playerId: number
 ): Promise<string | null> => {
   if (!newMetadata) return null;
@@ -220,7 +231,7 @@ const validateMetadataGlobalForUpdate = async (
   const oldPhoneNumber = extractPhoneNumber(oldMetadata || null);
   
   if (newPhoneNumber && newPhoneNumber !== oldPhoneNumber) {
-    const phoneConflict = await checkGlobalPhoneNumberConflict(newPhoneNumber, playerId);
+    const phoneConflict = await checkGlobalPhoneNumberConflict(newPhoneNumber, scope, playerId);
     if (phoneConflict) return phoneConflict;
   }
 
@@ -239,7 +250,7 @@ const validateMetadataGlobalForUpdate = async (
     if (!oldGameKeys.has(k)) diffGameKeys.add(k);
   });
 
-  return checkGlobalMetadataConflicts(diffBankKeys, diffGameKeys, playerId);
+  return checkGlobalMetadataConflicts(diffBankKeys, diffGameKeys, scope, playerId);
 };
 
 export const sanitizePlayerForResponse = (player: any, permissions: string[]) => {
@@ -276,7 +287,9 @@ export const sanitizePlayerForResponse = (player: any, permissions: string[]) =>
 
 export const getPlayers = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const players = await Player.findAll({
+      where: withTenancyWhere(scope),
       include: [{ model: Game, attributes: ['id', 'name'] }]
     });
     
@@ -299,6 +312,7 @@ export const getPlayers = async (req: AuthRequest, res: Response) => {
 
 export const getPlayerList = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const canViewProfit = userPermissions.includes('view:player_profit');
     const canViewUsers = userPermissions.includes('action:user_view');
@@ -351,7 +365,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
 
     const whereConditions: any[] = [];
 
-    if (!hasTextSearch && hasRange) {
+    if (hasRange) {
       whereConditions.push({ createdAt: createdCond });
     }
 
@@ -378,38 +392,28 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     const finalWhere: any =
       whereConditions.length > 0 ? { [Op.and]: whereConditions } : {};
 
-    const [
-      playersRaw,
-      allPlayersRaw,
-      statsRows,
-      games,
-      bankCatalog,
-      referralSetting,
-      tagSetting,
-      allOperators
-    ] = await Promise.all([
-      // 用于当前列表显示的玩家（按注册时间过滤并包含游戏信息）
-      Player.findAll({
-        where: finalWhere,
-        include: [{ model: Game, attributes: ['id', 'name'] }],
-      }),
-      // 全量玩家，用于计算 Referrals 统计，不受当前筛选影响
-      Player.findAll({
-        attributes: ['id', 'player_game_id', 'metadata', 'createdAt'],
-      }),
-      // PlayerStats 在这里按“全历史”聚合，不受日期筛选影响
-      PlayerStats.findAll() as any,
+    const needsMetadataScan =
+      Boolean(filterOpId) ||
+      Boolean(filterSource) ||
+      (hasTextSearch &&
+        effectiveSearchType !== 'player_game_id' &&
+        effectiveSearchType !== '');
+
+    const [bankCatalog, games, referralSetting, tagSetting, allOperators] = await Promise.all([
+      BankCatalog.findAll(),
       Game.findAll({
         attributes: ['id', 'name', 'icon', 'status'],
-        where: { status: 'active' },
+        where: withTenancyWhere(scope, { status: 'active' }),
       }),
-      BankCatalog.findAll(),
-      Setting.findByPk('referralSources'),
-      Setting.findByPk('tagOptions'),
-      canViewUsers ? User.findAll({
-        attributes: ['id', 'username', 'full_name'],
-        where: { status: 'active' } // Optional: filter active only
-      }) : []
+      getSettingValue(scope, 'referralSources'),
+      getSettingValue(scope, 'tagOptions'),
+      canViewUsers
+        ? User.findAll({
+            attributes: ['id', 'username', 'full_name'],
+            where: { tenant_id: scope.tenant_id, status: 'active' } as any,
+            order: [['username', 'ASC']],
+          } as any)
+        : [] as any[],
     ]);
 
     const normalizeDigits = (val: string) => String(val || '').replace(/\D/g, '');
@@ -419,81 +423,91 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     const operatorIdNum =
       filterOpId && !Number.isNaN(Number(filterOpId)) ? Number(filterOpId) : null;
 
-    let players = (playersRaw as any[]).filter((p) => {
-      const json = p?.toJSON ? p.toJSON() : p;
-      const meta = json?.metadata && typeof json.metadata === 'object' ? json.metadata : {};
-      const tags = Array.isArray(json?.tags) ? json.tags : [];
+    const sortOrder: any = [['createdAt', 'DESC']];
+    const offset = (page - 1) * pageSize;
 
-      if (filterTag) {
-        if (!tags.includes(filterTag)) return false;
+    let totalItems = 0;
+    let pagedPlayersRaw: any[] = [];
+
+    if (!needsMetadataScan) {
+      const result = await Player.findAndCountAll({
+        where: withTenancyWhere(scope, finalWhere),
+        order: sortOrder,
+        limit: pageSize,
+        offset,
+      } as any);
+      pagedPlayersRaw = (result.rows as any[]) || [];
+      totalItems =
+        typeof result.count === 'number' ? result.count : (result.count as any[]).length;
+    } else {
+      const all = await Player.findAll({
+        where: withTenancyWhere(scope, finalWhere),
+        order: sortOrder,
+      } as any);
+
+      const filtered = (all as any[]).filter((p) => {
+        const json = p?.toJSON ? p.toJSON() : p;
+        const meta = json?.metadata && typeof json.metadata === 'object' ? json.metadata : {};
+        const tags = Array.isArray(json?.tags) ? json.tags : [];
+
+        if (filterTag) {
+          if (!tags.includes(filterTag)) return false;
+        }
+
+        if (operatorIdNum != null) {
+          const createdBy = meta.createdByUserId;
+          if (createdBy !== operatorIdNum) return false;
+        }
+
+        if (filterSource) {
+          const src = String(meta.referralSource || '').toLowerCase();
+          if (src !== sourceLower) return false;
+        }
+
+        if (!hasTextSearch) return true;
+
+        if (effectiveSearchType === 'player_game_id') {
+          return true;
+        }
+
+        if (effectiveSearchType === 'bank_account') {
+          const banks = Array.isArray(meta.playerBanks) ? meta.playerBanks : [];
+          if (!qDigits) return false;
+          return banks.some((b: any) => normalizeDigits(b?.accountNumber).includes(qDigits));
+        }
+
+        if (effectiveSearchType === 'game_account') {
+          const gamesArr = Array.isArray(meta.gameAccounts) ? meta.gameAccounts : [];
+          if (!qLower) return false;
+          return gamesArr.some((g: any) => String(g?.accountId || '').toLowerCase().includes(qLower));
+        }
+
+        if (effectiveSearchType === 'phone') {
+          if (!qDigits) return false;
+          return normalizeDigits(meta.phoneNumber).includes(qDigits);
+        }
+
+        if (effectiveSearchType === 'full_name') {
+          if (!qLower) return false;
+          return String(meta.fullName || '').toLowerCase().includes(qLower);
+        }
+
+        return false;
+      });
+
+      totalItems = filtered.length;
+      const totalPagesTmp = totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
+      if (page > totalPagesTmp && totalPagesTmp > 0) {
+        page = totalPagesTmp;
       }
-
-      if (operatorIdNum != null) {
-        const createdBy = meta.createdByUserId;
-        if (createdBy !== operatorIdNum) return false;
-      }
-
-      if (filterSource) {
-        const src = String(meta.referralSource || '').toLowerCase();
-        if (src !== sourceLower) return false;
-      }
-
-      if (!hasTextSearch) return true;
-
-      if (effectiveSearchType === 'player_game_id') {
-        return true;
-      }
-
-      if (effectiveSearchType === 'bank_account') {
-        const banks = Array.isArray(meta.playerBanks) ? meta.playerBanks : [];
-        if (!qDigits) return false;
-        return banks.some((b: any) => normalizeDigits(b?.accountNumber).includes(qDigits));
-      }
-
-      if (effectiveSearchType === 'game_account') {
-        const gamesArr = Array.isArray(meta.gameAccounts) ? meta.gameAccounts : [];
-        if (!qLower) return false;
-        return gamesArr.some((g: any) =>
-          String(g?.accountId || '').toLowerCase().includes(qLower),
-        );
-      }
-
-      if (effectiveSearchType === 'phone') {
-        if (!qDigits) return false;
-        return normalizeDigits(meta.phoneNumber).includes(qDigits);
-      }
-
-      if (effectiveSearchType === 'full_name') {
-        if (!qLower) return false;
-        return String(meta.fullName || '').toLowerCase().includes(qLower);
-      }
-
-      return false;
-    });
-
-    const createdByIds = new Set<number>();
-    for (const p of players as any[]) {
-      const meta = (p as any).metadata || {};
-      const id = meta.createdByUserId;
-      if (typeof id === 'number' && Number.isFinite(id)) {
-        createdByIds.add(id);
-      }
+      const startIndex = (page - 1) * pageSize;
+      pagedPlayersRaw = totalItems === 0 ? [] : filtered.slice(startIndex, startIndex + pageSize);
     }
-    
-    // Create map from allOperators instead of fetching again
-    const createdByUserMap = new Map(
-        (allOperators as any[]).map((u) => [
-          u.id,
-          {
-            full_name:
-              typeof u.full_name === 'string' && u.full_name.trim().length > 0
-                ? u.full_name.trim()
-                : null,
-            username: u.username // Also store username
-          },
-        ])
-    );
 
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
+    if (page > totalPages && totalPages > 0) {
+      page = totalPages;
+    }
 
     type AggregatedStats = {
       lastDepositDate: string | null;
@@ -508,132 +522,84 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     };
 
     const statsMap = new Map<number, AggregatedStats>();
+    const pagedPlayerIds = (pagedPlayersRaw as any[])
+      .map((p) => Number(p?.id ?? null))
+      .filter((id) => Number.isFinite(id) && id > 0);
 
-    for (const row of statsRows as any[]) {
-      const playerId = row.player_id as number | null | undefined;
-      if (!playerId) continue;
+    if (pagedPlayerIds.length > 0) {
+      const statsAgg = await PlayerStats.findAll({
+        attributes: [
+          'player_id',
+          [sequelize.fn('MAX', sequelize.col('last_deposit_at')), 'last_deposit_at'],
+          [sequelize.fn('MAX', sequelize.col('last_withdraw_at')), 'last_withdraw_at'],
+          [sequelize.fn('SUM', sequelize.col('deposit_count')), 'deposit_count'],
+          [sequelize.fn('SUM', sequelize.col('withdraw_count')), 'withdraw_count'],
+          [sequelize.fn('SUM', sequelize.col('total_deposit')), 'total_deposit'],
+          [sequelize.fn('SUM', sequelize.col('total_withdraw')), 'total_withdraw'],
+          [sequelize.fn('SUM', sequelize.col('total_walve')), 'total_walve'],
+          [sequelize.fn('SUM', sequelize.col('total_tips')), 'total_tips'],
+          [sequelize.fn('SUM', sequelize.col('total_bonus')), 'total_bonus'],
+        ],
+        where: withTenancyWhere(scope, { player_id: { [Op.in]: pagedPlayerIds } }),
+        group: ['player_id'],
+        raw: true,
+      } as any);
 
-      const existing = statsMap.get(playerId);
-      const depositCount = Number(row.deposit_count || 0);
-      const withdrawCount = Number(row.withdraw_count || 0);
-      const totalDeposit = Number(row.total_deposit || 0);
-      const totalWithdraw = Number(row.total_withdraw || 0);
-      const totalWalve = Number(row.total_walve || 0);
-      const totalTips = Number(row.total_tips || 0);
-      const totalBonus = Number(row.total_bonus || 0);
-      const lastDepositAt = row.last_deposit_at
-        ? new Date(row.last_deposit_at)
-        : null;
-      const lastWithdrawAt = row.last_withdraw_at
-        ? new Date(row.last_withdraw_at)
-        : null;
-
-      if (!existing) {
+      for (const row of statsAgg as any[]) {
+        const playerId = Number(row.player_id ?? null);
+        if (!Number.isFinite(playerId) || playerId <= 0) continue;
+        const lastDepositAt = row.last_deposit_at ? new Date(row.last_deposit_at) : null;
+        const lastWithdrawAt = row.last_withdraw_at ? new Date(row.last_withdraw_at) : null;
         statsMap.set(playerId, {
-          lastDepositDate: lastDepositAt ? lastDepositAt.toISOString() : null,
-          lastWithdrawDate: lastWithdrawAt ? lastWithdrawAt.toISOString() : null,
-          depositCount,
-          withdrawCount,
-          totalDeposit,
-          totalWithdraw,
-          totalWalve,
-          totalTips,
-          totalBonus,
+          lastDepositDate: lastDepositAt && !Number.isNaN(lastDepositAt.getTime()) ? lastDepositAt.toISOString() : null,
+          lastWithdrawDate: lastWithdrawAt && !Number.isNaN(lastWithdrawAt.getTime()) ? lastWithdrawAt.toISOString() : null,
+          depositCount: Number(row.deposit_count || 0),
+          withdrawCount: Number(row.withdraw_count || 0),
+          totalDeposit: Number(row.total_deposit || 0),
+          totalWithdraw: Number(row.total_withdraw || 0),
+          totalWalve: Number(row.total_walve || 0),
+          totalTips: Number(row.total_tips || 0),
+          totalBonus: Number(row.total_bonus || 0),
         });
+      }
+    }
+
+    const createdByIdsSet = new Set<number>();
+    for (const p of pagedPlayersRaw as any[]) {
+      const json = p?.toJSON ? p.toJSON() : p;
+      const meta = json?.metadata && typeof json.metadata === 'object' ? json.metadata : {};
+      const cid = Number(meta?.createdByUserId ?? null);
+      if (Number.isFinite(cid) && cid > 0) createdByIdsSet.add(cid);
+    }
+    if (req.user?.id) createdByIdsSet.add(Number(req.user.id));
+
+    const operatorIdSet = new Set<number>((allOperators as any[]).map((u: any) => Number(u.id)));
+    const extraIds = Array.from(createdByIdsSet).filter((id) => !operatorIdSet.has(id));
+    let extraUsers: any[] = [];
+    if (extraIds.length > 0) {
+      extraUsers = (await User.findAll({
+        attributes: ['id', 'username', 'full_name'],
+        where: withTenancyWhere(scope, { id: { [Op.in]: extraIds }, status: 'active' } as any),
+      } as any)) as any[];
+    }
+
+    const createdByUserMap = new Map<number, { full_name: string | null; username: string | null }>();
+    for (const u of [...(allOperators as any[]), ...extraUsers]) {
+      const name = resolveOperatorName(u);
+      if (name) {
+        createdByUserMap.set(u.id, { full_name: name, username: u.username || null });
       } else {
-        const next: AggregatedStats = {
-          lastDepositDate: existing.lastDepositDate,
-          lastWithdrawDate: existing.lastWithdrawDate,
-          depositCount: existing.depositCount + depositCount,
-          withdrawCount: existing.withdrawCount + withdrawCount,
-          totalDeposit: existing.totalDeposit + totalDeposit,
-          totalWithdraw: existing.totalWithdraw + totalWithdraw,
-          totalWalve: existing.totalWalve + totalWalve,
-          totalTips: existing.totalTips + totalTips,
-          totalBonus: existing.totalBonus + totalBonus,
-        };
-
-        if (lastDepositAt) {
-          if (
-            !next.lastDepositDate ||
-            lastDepositAt.toISOString() > next.lastDepositDate
-          ) {
-            next.lastDepositDate = lastDepositAt.toISOString();
-          }
-        }
-
-        if (lastWithdrawAt) {
-          if (
-            !next.lastWithdrawDate ||
-            lastWithdrawAt.toISOString() > next.lastWithdrawDate
-          ) {
-            next.lastWithdrawDate = lastWithdrawAt.toISOString();
-          }
-        }
-
-        statsMap.set(playerId, next);
+        createdByUserMap.set(u.id, {
+          full_name:
+            typeof u.full_name === 'string' && u.full_name.trim().length > 0 ? u.full_name.trim() : null,
+          username: u.username || null,
+        });
       }
     }
 
-    type ReferralStatEntry = {
-      playerId: number;
-      playerGameId: string;
-      joinedAt: string | null;
-      totalDeposit: number | null;
-      totalWithdraw: number | null;
-    };
-
-    const referralStatsMap = new Map<number, ReferralStatEntry[]>();
-
-    for (const p of allPlayersRaw as any[]) {
-      const playerId = p.id as number | undefined;
-      if (!playerId) continue;
-
-      const metadata = (p.metadata || {}) as any;
-      const referrerId = metadata.referrerId;
-      if (typeof referrerId !== 'number' || !Number.isFinite(referrerId)) {
-        continue;
-      }
-
-      const stats = statsMap.get(playerId) || {
-        lastDepositDate: null,
-        lastWithdrawDate: null,
-        depositCount: 0,
-        withdrawCount: 0,
-        totalDeposit: 0,
-        totalWithdraw: 0,
-        totalWalve: 0,
-        totalTips: 0,
-        totalBonus: 0,
-      };
-
-      const joinedRaw = (p as any).createdAt || (p as any).created_at || null;
-      const joinedAt =
-        joinedRaw instanceof Date
-          ? joinedRaw.toISOString()
-          : typeof joinedRaw === 'string'
-          ? joinedRaw
-          : null;
-
-      const entry: ReferralStatEntry = {
-        playerId,
-        playerGameId: String(p.player_game_id || ''),
-        joinedAt,
-        totalDeposit: canViewProfit ? stats.totalDeposit : null,
-        totalWithdraw: canViewProfit ? stats.totalWithdraw : null,
-      };
-
-      const arr = referralStatsMap.get(referrerId) || [];
-      arr.push(entry);
-      referralStatsMap.set(referrerId, arr);
-    }
-
-    const sanitizedPlayers = players.map((p: any) =>
-      sanitizePlayerForResponse(p, userPermissions)
-    );
-
-    const playersPayloadAll = (sanitizedPlayers as any[]).map((p) => {
-      const json = p.toJSON ? p.toJSON() : { ...p };
+    const playersPayload = (pagedPlayersRaw as any[]).map((p: any) => {
+      const sanitized = sanitizePlayerForResponse(p, userPermissions);
+      const json = sanitized?.toJSON ? sanitized.toJSON() : { ...sanitized };
 
       const metadataRaw = json.metadata || {};
       const createdByUserId = metadataRaw.createdByUserId;
@@ -641,14 +607,10 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       if (typeof createdByUserId === 'number' && Number.isFinite(createdByUserId)) {
         const u = createdByUserMap.get(createdByUserId);
         if (u) {
-          // Prioritize full_name, fallback to username if full_name is missing/empty
           createdByFullName = u.full_name || u.username || null;
         }
       }
-      const metadata = {
-        ...metadataRaw,
-        createdByFullName,
-      };
+      const metadata = { ...metadataRaw, createdByFullName };
 
       const stats = statsMap.get(json.id) || {
         lastDepositDate: null,
@@ -662,19 +624,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         totalBonus: 0,
       };
 
-      const netProfit =
-        canViewProfit && stats
-          ? stats.totalDeposit - stats.totalWithdraw
-          : null;
-
-      const referralStatsRaw = referralStatsMap.get(json.id) || [];
-      const referralStats = referralStatsRaw.map((r) => ({
-        playerId: r.playerId,
-        player_game_id: r.playerGameId,
-        joinedAt: r.joinedAt,
-        totalDeposit: r.totalDeposit,
-        totalWithdraw: r.totalWithdraw,
-      }));
+      const netProfit = canViewProfit ? stats.totalDeposit - stats.totalWithdraw : null;
 
       let tags = json.tags;
       if (typeof tags === 'string') {
@@ -707,12 +657,8 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
           totalTips: canViewProfit ? stats.totalTips : null,
           totalBonus: canViewProfit ? stats.totalBonus : null,
         },
-        referralStats,
       };
     });
-
-    // Remove secondary manual filtering as Sequelize WHERE clause is now robust
-    const playersPayload = playersPayloadAll;
 
     const bankNameOptions = (bankCatalog as any[])
       .map((b) => (b && typeof b.name === 'string' ? b.name : null))
@@ -750,7 +696,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
        }
     }
 
-    let referralValue = referralSetting?.get('value') as any;
+    let referralValue = referralSetting as any;
     // Handle double-encoded JSON string for referralSources
     if (typeof referralValue === 'string' && referralValue.startsWith('[')) {
       try {
@@ -764,7 +710,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         )
       : [];
 
-    let tagValue = tagSetting?.get('value') as any;
+    let tagValue = tagSetting as any;
     // Handle double-encoded JSON string for tagOptions
     if (typeof tagValue === 'string' && tagValue.startsWith('[')) {
       try {
@@ -781,15 +727,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
           }))
       : [];
 
-    const totalItems = playersPayload.length;
-    const totalPages =
-      totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
-    if (page > totalPages && totalPages > 0) {
-      page = totalPages;
-    }
-    const startIndex = (page - 1) * pageSize;
-    const pagedPlayers =
-      totalItems === 0 ? [] : playersPayload.slice(startIndex, startIndex + pageSize);
+    const pagedPlayers = playersPayload;
 
     await logAudit(
       req.user?.id ?? null,
@@ -806,6 +744,50 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       getClientIp(req) || null
     );
 
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
+        : null;
+
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let rows: any[] = [];
+        if (isSuperAdmin) {
+          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch (e) {
+      void e;
+    }
+
     sendSuccess(res, 'Code1', {
       players: pagedPlayers,
       pagination: {
@@ -821,14 +803,140 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       referralSourceOptions,
       tagOptions,
       operatorOptions,
+      subBrandOptions,
     });
   } catch (error) {
     sendError(res, 'Code801', 500);
   }
 };
 
+export const getPlayerListContext = async (req: AuthRequest, res: Response) => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const userPermissions = req.user?.permissions || [];
+    const canViewUsers = userPermissions.includes('action:user_view');
+    const cacheKey = `plc:${scope.tenant_id}:${scope.sub_brand_id}:${canViewUsers ? 'withUsers' : 'self'}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      return sendSuccess(res, 'Code1', cached);
+    }
+
+    const [referralSetting, tagSetting, allOperators] = await Promise.all([
+      getSettingValue(scope, 'referralSources'),
+      getSettingValue(scope, 'tagOptions'),
+      canViewUsers
+        ? User.findAll({
+            attributes: ['id', 'username', 'full_name'],
+            where: { tenant_id: scope.tenant_id, status: 'active' } as any,
+            order: [['username', 'ASC']],
+          } as any)
+        : [] as any[],
+    ]);
+
+    let operatorOptions: any[] = [];
+    if (canViewUsers) {
+      operatorOptions = (allOperators as any[])
+        .map((u) => {
+          const name = resolveOperatorName(u);
+          return name ? { id: u.id, name } : null;
+        })
+        .filter(Boolean);
+    } else if (req.user) {
+      const name = resolveOperatorName(req.user);
+      if (name) {
+        operatorOptions = [{ id: req.user.id, name }];
+      }
+    }
+
+    let referralValue = referralSetting as any;
+    if (typeof referralValue === 'string' && referralValue.startsWith('[')) {
+      try {
+        referralValue = JSON.parse(referralValue);
+      } catch (e) {
+        void e;
+      }
+    }
+    const referralSourceOptions = Array.isArray(referralValue)
+      ? referralValue.filter((v: any) => typeof v === 'string' && v.trim().length > 0)
+      : [];
+
+    let tagValue = tagSetting as any;
+    if (typeof tagValue === 'string' && tagValue.startsWith('[')) {
+      try {
+        tagValue = JSON.parse(tagValue);
+      } catch (e) {
+        void e;
+      }
+    }
+    const tagOptions = Array.isArray(tagValue)
+      ? tagValue
+          .filter((t: any) => t && typeof t.name === 'string')
+          .map((t: any) => ({
+            name: t.name,
+            color: t.color || '#3B82F6',
+          }))
+      : [];
+
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
+        : null;
+
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let rows: any[] = [];
+        if (isSuperAdmin) {
+          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch (e) {
+      void e;
+    }
+
+    const payload = {
+      operatorOptions,
+      referralSourceOptions,
+      tagOptions,
+      subBrandOptions,
+    };
+    setCache(cacheKey, payload, 300);
+    sendSuccess(res, 'Code1', payload);
+  } catch (error) {
+    sendError(res, 'Code822', 500);
+  }
+};
+
 export const searchPlayers = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const qRaw = (req.query.q as string | undefined) || '';
     const q = qRaw.trim();
     if (!q) {
@@ -838,18 +946,20 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
 
     const limit = 50;
 
-    const include = [{ model: Game, attributes: ['id', 'name'] }];
+    const include = [{ model: Game, attributes: ['id', 'name'], required: false, where: withTenancyWhere(scope) as any }];
 
     const exactPlayer = await Player.findOne({
-      where: { player_game_id: q },
+      where: withTenancyWhere(scope, { player_game_id: q }),
       include,
     } as any);
 
     const playersLike = await Player.findAll({
       where: {
-        player_game_id: {
-          [Op.like]: `%${q}%`,
-        },
+        ...withTenancyWhere(scope, {
+          player_game_id: {
+            [Op.like]: `%${q}%`,
+          },
+        }),
       },
       include,
       order: [['id', 'DESC']],
@@ -871,7 +981,7 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
 
     const activeGames = await Game.findAll({
       attributes: ['name'],
-      where: { status: 'active' },
+      where: withTenancyWhere(scope, { status: 'active' }),
     } as any);
     const activeGameNames = new Set(
       (activeGames as any[]).map((g) =>
@@ -911,47 +1021,33 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
   }
 };
 
-const generateNextPlayerId = async (): Promise<string> => {
-  const prefix = 'JK99';
-  
-  try {
-    // Find the player with the highest numeric suffix
-    const lastPlayer = await Player.findOne({
-      where: {
-        player_game_id: {
-          [Op.like]: `${prefix}%`
-        }
-      },
-      order: [['player_game_id', 'DESC']],
-      attributes: ['player_game_id']
-    });
+const generateNextPlayerId = async (scope: { tenant_id: number; sub_brand_id: number }): Promise<string> => {
+  const sb = await SubBrand.findOne({ where: { id: scope.sub_brand_id, tenant_id: scope.tenant_id } as any } as any);
+  const rawPrefix = typeof (sb as any)?.code === 'string' ? String((sb as any).code).trim() : '';
+  const cleanedPrefix = rawPrefix.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const prefix = cleanedPrefix.length > 0 ? cleanedPrefix : `SB${scope.sub_brand_id}`;
 
-    if (!lastPlayer) {
-      // No existing players with this prefix, start with 00001
-      return `${prefix}00001`;
-    }
+  const random6 = () => {
+    const v = randomBytes(4).readUInt32BE(0) % 999999;
+    return String(v + 1).padStart(6, '0');
+  };
 
-    const lastId = lastPlayer.get('player_game_id') as string;
-    const numericPart = lastId.replace(prefix, '');
-    
-    if (!/^\d+$/.test(numericPart)) {
-      // Invalid format, start fresh
-      return `${prefix}00001`;
-    }
-
-    const nextNumber = parseInt(numericPart, 10) + 1;
-    const paddedNumber = nextNumber.toString().padStart(5, '0');
-    
-    return `${prefix}${paddedNumber}`;
-  } catch (error) {
-    // Fallback to starting with 00001
-    return `${prefix}00001`;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const candidate = `${prefix}${random6()}`;
+    const exists = await Player.findOne({
+      where: withTenancyWhere(scope, { player_game_id: candidate }),
+      attributes: ['id'],
+    } as any);
+    if (!exists) return candidate;
   }
+
+  throw new Error('FAILED_TO_GENERATE_UNIQUE_PLAYER_ID');
 };
 
 export const getNextPlayerId = async (req: AuthRequest, res: Response) => {
   try {
-    const nextId = await generateNextPlayerId();
+    const scope = getTenancyScopeOrThrow(req);
+    const nextId = await generateNextPlayerId(scope);
     sendSuccess(res, 'Code1', { nextPlayerId: nextId });
   } catch (error) {
     sendError(res, 'Code803', 500);
@@ -960,6 +1056,7 @@ export const getNextPlayerId = async (req: AuthRequest, res: Response) => {
 
 export const retryCreateGameAccount = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const playerId = Number(req.params.id);
     if (!Number.isInteger(playerId) || playerId <= 0) {
       sendError(res, 'Code804', 400);
@@ -973,7 +1070,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
       return;
     }
 
-    const player = await Player.findByPk(playerId);
+    const player = await Player.findOne({ where: withTenancyWhere(scope, { id: playerId }) } as any);
     if (!player) {
       sendError(res, 'Code806', 404);
       return;
@@ -988,8 +1085,8 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     }
 
     const game = await Game.findOne({
-      where: { name: gameName, status: 'active', use_api: true },
-      include: [{ model: Product, attributes: ['providerCode'] }],
+      where: withTenancyWhere(scope, { name: gameName, status: 'active', use_api: true }),
+      include: [{ model: Product, attributes: ['providerCode'], required: false }],
     } as any);
     if (!game) {
       sendError(res, 'Code807', 400);
@@ -1114,13 +1211,14 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
 
 export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const playerId = Number(req.params.id);
     if (!Number.isInteger(playerId) || playerId <= 0) {
       sendError(res, 'Code816', 400);
       return;
     }
 
-    const player = await Player.findByPk(playerId);
+    const player = await Player.findOne({ where: withTenancyWhere(scope, { id: playerId }) } as any);
     if (!player) {
       sendError(res, 'Code817', 404);
       return;
@@ -1136,11 +1234,11 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
 
     const [activeApiGames, activeNonApiGames] = await Promise.all([
       Game.findAll({
-        where: { status: 'active', use_api: true },
-        include: [{ model: Product, attributes: ['providerCode'] }],
+        where: withTenancyWhere(scope, { status: 'active', use_api: true }),
+        include: [{ model: Product, attributes: ['providerCode'], required: false }],
       } as any),
       Game.findAll({
-        where: { status: 'active', use_api: false },
+        where: withTenancyWhere(scope, { status: 'active', use_api: false }),
       } as any),
     ]);
 
@@ -1302,19 +1400,31 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
 
 export const createPlayer = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { player_game_id, game_id, tags, metadata } = req.body;
     const userPermissions = req.user?.permissions || [];
     
-    // Generate auto player ID if not provided or if provided ID doesn't match the pattern
-    const finalPlayerId = player_game_id && player_game_id.startsWith('JK99') 
-      ? player_game_id 
-      : await generateNextPlayerId();
+    // Generate/validate player ID by sub brand prefix: <SubBrand.code><6 digits>
+    const sb = await SubBrand.findOne({ where: { id: scope.sub_brand_id, tenant_id: scope.tenant_id } as any } as any);
+    const rawPrefix = typeof (sb as any)?.code === 'string' ? String((sb as any).code).trim() : '';
+    const cleanedPrefix = rawPrefix.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const prefix = cleanedPrefix.length > 0 ? cleanedPrefix : `SB${scope.sub_brand_id}`;
+    const pattern = new RegExp(`^${prefix}[0-9]{6}$`);
+
+    let finalPlayerId: string;
+    if (typeof player_game_id === 'string' && player_game_id.trim().length > 0 && pattern.test(player_game_id.trim().toUpperCase())) {
+      finalPlayerId = player_game_id.trim().toUpperCase();
+    } else {
+      finalPlayerId = await generateNextPlayerId(scope);
+    }
     
     // Check if player already exists (same ID)
     const existingPlayer = await Player.findOne({ 
       where: { 
-        player_game_id: finalPlayerId,
-        game_id: game_id || null
+        ...withTenancyWhere(scope, {
+          player_game_id: finalPlayerId,
+          game_id: game_id || null,
+        }),
       } 
     });
     if (existingPlayer) {
@@ -1327,7 +1437,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
       sendError(res, validationError === 'P105' ? 'Code619' : 'Code620', 400); // Duplicate Bank or Game
       return;
     }
-    const globalError = await validateMetadataGlobalForCreate(metadata);
+    const globalError = await validateMetadataGlobalForCreate(metadata, scope);
     if (globalError) {
       const codeMap: Record<string, string> = { 'P102': 'Code621', 'P103': 'Code622', 'P110': 'Code623' };
       sendError(res, codeMap[globalError] || 'Code624', 400); // Global conflict
@@ -1354,46 +1464,65 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
     // 1. 获取所有active游戏（包含use_api和非use_api）
     const allActiveApiGames = await Game.findAll({
       where: {
-        status: 'active',
-        use_api: true
+        ...withTenancyWhere(scope, {
+          status: 'active',
+          use_api: true,
+        }),
       },
-      include: [{ model: Product, attributes: ['providerCode'] }]
+      include: [{ model: Product, attributes: ['providerCode'], required: false }]
     });
 
     // 获取所有active但use_api=false的游戏（非API游戏）
     const allActiveNonApiGames = await Game.findAll({
       where: {
-        status: 'active',
-        use_api: false
+        ...withTenancyWhere(scope, {
+          status: 'active',
+          use_api: false,
+        }),
       }
     });
 
     // 合并所有active游戏
     const allActiveGames = [...allActiveApiGames, ...allActiveNonApiGames];
 
-    // 2. 从metadata获取gameAccounts
-    const gameAccounts = enrichedMetadata?.gameAccounts || [];
+    // 2. 从metadata获取gameAccounts（仅作为“账号名覆写”的参考，严格在当前scope内匹配）
+    const gameAccounts = Array.isArray(enrichedMetadata?.gameAccounts) ? enrichedMetadata.gameAccounts : [];
 
-    // 3. 构建需要创建的游戏列表（包含gameAccounts中的和遗漏的active游戏）
+    // 3. 构建需要创建的游戏列表（仅使用“当前 sub brand 下的游戏”，避免跨 sub brand 混淆）
     const gamesToCreate: Array<{ gameName: string; accountId: string; game: any }> = [];
+    const gameById = new Map<number, any>();
+    const gameByName = new Map<string, any>();
+    for (const g of allActiveGames) {
+      gameById.set(Number(g.id), g);
+      const key = String(g.name || '').trim().toLowerCase();
+      if (key) gameByName.set(key, g);
+    }
 
-    // 首先添加gameAccounts中的游戏（匹配所有active游戏）
+    // 3.1 先处理metadata中携带的条目：优先用 gameId 精确匹配；否则用 name 在当前scope匹配
     for (const ga of gameAccounts) {
-      if (!ga.gameName || !ga.accountId) continue;
-      
-      const game = allActiveGames.find(g => g.name === ga.gameName);
-      if (game) {
+      const rawId = (ga as any).gameId ?? (ga as any).game_id ?? null;
+      const gameIdNum = rawId != null ? Number(rawId) : null;
+      let scopedGame: any | null = null;
+      if (Number.isFinite(gameIdNum) && gameById.has(Number(gameIdNum))) {
+        scopedGame = gameById.get(Number(gameIdNum));
+      } else if (ga && typeof ga.gameName === 'string') {
+        const key = ga.gameName.trim().toLowerCase();
+        scopedGame = gameByName.get(key) || null;
+      }
+      if (!scopedGame) continue; // 忽略跨scope或无法识别的项
+      const accountId = typeof ga.accountId === 'string' && ga.accountId.trim().length > 0 ? ga.accountId.trim() : String(finalPlayerId);
+      if (!gamesToCreate.some((x) => Number(x.game?.id) === Number(scopedGame.id))) {
         gamesToCreate.push({
-          gameName: ga.gameName,
-          accountId: ga.accountId,
-          game
+          gameName: scopedGame.name,
+          accountId,
+          game: scopedGame,
         });
       }
     }
 
     // 然后检查是否有遗漏的active API游戏（需要调用供应商API）
     for (const game of allActiveApiGames) {
-      const alreadyIncluded = gamesToCreate.some(g => g.gameName === game.name);
+      const alreadyIncluded = gamesToCreate.some(g => Number(g.game?.id) === Number(game.id));
       if (!alreadyIncluded) {
         gamesToCreate.push({
           gameName: game.name,
@@ -1405,7 +1534,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
 
     // 最后添加所有active非API游戏（创建空账号，不需要API调用）
     for (const game of allActiveNonApiGames) {
-      const alreadyIncluded = gamesToCreate.some(g => g.gameName === game.name);
+      const alreadyIncluded = gamesToCreate.some(g => Number(g.game?.id) === Number(game.id));
       if (!alreadyIncluded) {
         gamesToCreate.push({
           gameName: game.name,
@@ -1603,14 +1732,16 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
     // ─────────────────────────────────────────────
     // 第二步：无论供应商成功失败，都创建本地player
     // ─────────────────────────────────────────────
-    const player = await Player.create({
-      player_game_id: finalPlayerId,
-      game_id: game_id || null,
-      tags: tags || [],
-      metadata: finalMetadata,
-      total_in: 0,
-      total_out: 0
-    });
+    const player = await Player.create(
+      withTenancyCreate(scope, {
+        player_game_id: finalPlayerId,
+        game_id: game_id || null,
+        tags: tags || [],
+        metadata: finalMetadata,
+        total_in: 0,
+        total_out: 0,
+      }),
+    );
 
     await logAudit(req.user?.id, 'PLAYER_CREATE', null, player.toJSON(), req.ip);
 
@@ -1643,6 +1774,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
 
 export const updatePlayer = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
+        const scope = getTenancyScopeOrThrow(req);
         const { id } = req.params;
     const { player_game_id, game_id, tags, metadata } = req.body;
     const userPermissions = req.user?.permissions || [];
@@ -1653,7 +1785,7 @@ export const updatePlayer = async (req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const player = await Player.findByPk(playerId);
+    const player = await Player.findOne({ where: withTenancyWhere(scope, { id: playerId }) } as any);
     if (!player) {
         sendError(res, 'Code812', 404);
         return;
@@ -1682,6 +1814,7 @@ export const updatePlayer = async (req: AuthRequest, res: Response): Promise<voi
       const globalError = await validateMetadataGlobalForUpdate(
         effectiveMetadata,
         originalData.metadata,
+        scope,
         player.id
       );
       if (globalError) {
@@ -1709,6 +1842,7 @@ export const updatePlayer = async (req: AuthRequest, res: Response): Promise<voi
 
 export const deletePlayer = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
+        const scope = getTenancyScopeOrThrow(req);
         const { id } = req.params;
         const playerId = Number(id);
 
@@ -1717,7 +1851,7 @@ export const deletePlayer = async (req: AuthRequest, res: Response): Promise<voi
           return;
         }
 
-        const player = await Player.findByPk(playerId);
+        const player = await Player.findOne({ where: withTenancyWhere(scope, { id: playerId }) } as any);
         if (!player) {
             sendError(res, 'Code817', 404);
             return;
@@ -1736,6 +1870,7 @@ export const deletePlayer = async (req: AuthRequest, res: Response): Promise<voi
 
 export const getPlayerStatistics = async (req: AuthRequest, res: Response) => {
     try {
+        const scope = getTenancyScopeOrThrow(req);
         const now = new Date();
         const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
@@ -1750,8 +1885,9 @@ export const getPlayerStatistics = async (req: AuthRequest, res: Response) => {
         const [allPlayers, allStats] = await Promise.all([
             Player.findAll({
                 attributes: ['id', 'player_game_id', 'metadata', 'createdAt'],
+                where: withTenancyWhere(scope),
             }),
-            PlayerStats.findAll() as any
+            PlayerStats.findAll({ where: withTenancyWhere(scope) } as any) as any
         ]);
 
         // Create stats map for player activity
@@ -1901,4 +2037,79 @@ export const getPlayerStatistics = async (req: AuthRequest, res: Response) => {
     } catch (error) {
         sendError(res, 'Code815', 500);
     }
+};
+
+export const getPlayerReferralStats = async (req: AuthRequest, res: Response) => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const userPermissions = req.user?.permissions || [];
+    const canViewProfit = userPermissions.includes('view:player_profit');
+
+    const idRaw = req.params.id;
+    const referrerId = Number(idRaw);
+    if (!Number.isInteger(referrerId) || referrerId <= 0) {
+      sendError(res, 'Code820', 400);
+      return;
+    }
+
+    const allPlayers = await Player.findAll({
+      attributes: ['id', 'player_game_id', 'metadata', 'createdAt'],
+      where: withTenancyWhere(scope),
+      order: [['id', 'DESC']],
+    } as any);
+
+    const referredPlayers = (allPlayers as any[]).filter((p) => {
+      const meta = p?.metadata && typeof p.metadata === 'object' ? p.metadata : {};
+      return meta.referrerId === referrerId;
+    });
+
+    const referredIds = referredPlayers
+      .map((p) => Number(p?.id ?? null))
+      .filter((v) => Number.isFinite(v) && v > 0);
+
+    const totalsMap = new Map<number, { totalDeposit: number; totalWithdraw: number }>();
+    if (referredIds.length > 0) {
+      const rows = await PlayerStats.findAll({
+        attributes: [
+          'player_id',
+          [sequelize.fn('SUM', sequelize.col('total_deposit')), 'total_deposit'],
+          [sequelize.fn('SUM', sequelize.col('total_withdraw')), 'total_withdraw'],
+        ],
+        where: withTenancyWhere(scope, { player_id: { [Op.in]: referredIds } }),
+        group: ['player_id'],
+        raw: true,
+      } as any);
+      for (const row of rows as any[]) {
+        const pid = Number(row.player_id ?? null);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        totalsMap.set(pid, {
+          totalDeposit: Number(row.total_deposit || 0),
+          totalWithdraw: Number(row.total_withdraw || 0),
+        });
+      }
+    }
+
+    const payload = referredPlayers.map((p: any) => {
+      const pid = Number(p?.id ?? null);
+      const createdRaw = p?.createdAt ?? p?.created_at ?? null;
+      const joinedAt =
+        createdRaw instanceof Date
+          ? createdRaw.toISOString()
+          : typeof createdRaw === 'string'
+            ? createdRaw
+            : null;
+      const totals = totalsMap.get(pid) || { totalDeposit: 0, totalWithdraw: 0 };
+      return {
+        playerId: pid,
+        player_game_id: String(p?.player_game_id || ''),
+        joinedAt,
+        totalDeposit: canViewProfit ? totals.totalDeposit : null,
+        totalWithdraw: canViewProfit ? totals.totalWithdraw : null,
+      };
+    });
+
+    sendSuccess(res, 'Code1', payload);
+  } catch (error) {
+    sendError(res, 'Code821', 500);
+  }
 };

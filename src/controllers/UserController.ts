@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { User, Permission, Role, UserRole, UserPermission } from '../models';
+import { User, Permission, Role, UserRole, UserPermission, Tenant, SubBrand } from '../models';
 import bcrypt from 'bcryptjs';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
@@ -40,18 +40,24 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
     });
     
     // Check if requester is Super Admin
-    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+    const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
     
     // Check specific permissions
     const permissions = (req.user?.permissions || []) as string[];
-    const canViewOthers = permissions.includes('action:user_view');
     const canViewFullIp = permissions.includes('view:full_ip');
     const canViewSensitive = permissions.includes('view:sensitive_info');
 
-    // If not super admin and cannot view others, return only self
-    const whereClause: any = {};
-    if (!isSuperAdmin && !canViewOthers) {
-       whereClause.id = requesterId;
+    const requesterTenantId = (requester as any)?.tenant_id ?? req.user?.tenant_id ?? null;
+    let whereClause: any = {};
+    if (isSuperAdmin) {
+      whereClause = {};
+    } else if (isOperator && requesterTenantId) {
+      whereClause = { tenant_id: requesterTenantId };
+    } else {
+      whereClause = { id: requesterId };
     }
 
     const users = await User.findAll({
@@ -65,13 +71,23 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
         {
           model: Permission,
           through: { attributes: [] }
+        },
+        {
+          model: SubBrand,
+          attributes: ['id', 'tenant_id', 'code', 'name', 'status'],
+          required: false,
+        },
+        {
+          model: Tenant,
+          attributes: ['id', 'prefix', 'name'],
+          required: false,
         }
       ]
     });
     
     let visibleUsers = users;
-    if (!isSuperAdmin && canViewOthers) {
-        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    if (!isSuperAdmin) {
+        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
     }
 
     const formattedUsers = visibleUsers.map((user) => {
@@ -115,7 +131,13 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
           ...base,
           last_login_at: lastLoginTime,
           last_login_ip: lastLoginIp,
-          api_key: apiKeyMask
+          api_key: apiKeyMask,
+          tenant_id: (user as any).tenant_id ?? null,
+          tenant_name: (user as any).Tenant?.name ?? null,
+          tenant_prefix: (user as any).Tenant?.prefix ?? null,
+          sub_brand_id: (user as any).sub_brand_id ?? null,
+          sub_brand_name: (user as any).SubBrand?.name ?? null,
+          sub_brand_code: (user as any).SubBrand?.code ?? null,
       };
     });
 
@@ -133,7 +155,10 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
       include: [{ model: Role, through: { attributes: [] } }]
     });
     
-    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+    const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
     
     // Get roles with permission filtering
     let roles = await Role.findAll({
@@ -153,13 +178,17 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
     
     // Reuse logic from getUsers but without response sending
     const userPermissions = (req.user?.permissions || []) as string[];
-    const canViewOthers = userPermissions.includes('action:user_view');
     const canViewFullIp = userPermissions.includes('view:full_ip');
     const canViewSensitive = userPermissions.includes('view:sensitive_info');
 
-    const whereClause: any = {};
-    if (!isSuperAdmin && !canViewOthers) {
-       whereClause.id = requesterId;
+    const requesterTenantId = (requester as any)?.tenant_id ?? req.user?.tenant_id ?? null;
+    let whereClause: any = {};
+    if (isSuperAdmin) {
+      whereClause = {};
+    } else if (isOperator && requesterTenantId) {
+      whereClause = { tenant_id: requesterTenantId };
+    } else {
+      whereClause = { id: requesterId };
     }
 
     const users = await User.findAll({
@@ -173,13 +202,23 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
         {
           model: Permission,
           through: { attributes: [] }
+        },
+        {
+          model: SubBrand,
+          attributes: ['id', 'tenant_id', 'code', 'name', 'status'],
+          required: false,
+        },
+        {
+          model: Tenant,
+          attributes: ['id', 'prefix', 'name'],
+          required: false,
         }
       ]
     });
 
     let visibleUsers = users;
-    if (!isSuperAdmin && canViewOthers) {
-        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    if (!isSuperAdmin) {
+        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
     }
 
     const formattedUsers = visibleUsers.map((user) => {
@@ -222,11 +261,34 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
           lastLoginTime: lastLoginTime,
           lastLoginIp: lastLoginIp,
           apiKeyMask: apiKeyMask,
-          twoFactorEnabled: user.two_factor_enabled
+          twoFactorEnabled: user.two_factor_enabled,
+          tenant_id: (user as any).tenant_id ?? null,
+          tenant_name: (user as any).Tenant?.name ?? null,
+          tenant_prefix: (user as any).Tenant?.prefix ?? null,
+          sub_brand_id: (user as any).sub_brand_id ?? null,
+          sub_brand_name: (user as any).SubBrand?.name ?? null,
+          sub_brand_code: (user as any).SubBrand?.code ?? null,
       };
     });
 
-    sendSuccess(res, 'Code1', { roles, permissions, users: formattedUsers });
+    let tenants: any[] = [];
+    let subBrands: any[] = [];
+    if (isSuperAdmin) {
+      [tenants, subBrands] = await Promise.all([
+        Tenant.findAll({ order: [['id', 'ASC']] }),
+        SubBrand.findAll({ order: [['id', 'ASC']] }),
+      ]);
+    } else if (isOperator) {
+      const tid = Number((requester as any)?.tenant_id ?? req.user?.tenant_id ?? null);
+      if (Number.isFinite(tid) && tid > 0) {
+        [tenants, subBrands] = await Promise.all([
+          Tenant.findAll({ where: { id: tid } as any, order: [['id', 'ASC']] }),
+          SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] }),
+        ]);
+      }
+    }
+
+    sendSuccess(res, 'Code1', { roles, permissions, users: formattedUsers, tenants, subBrands });
   } catch (error) {
     sendError(res, 'Code603', 500); // Internal server error
   }
@@ -234,7 +296,7 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
 
 export const createUser = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { username, password, full_name, fullName, roles, permissions, currency } = req.body;
+    const { username, password, full_name, fullName, roles, permissions, currency, sub_brand_id, subBrandId, subBrandCode, prefix } = req.body;
     
     // Check if requester is Super Admin
     const requesterId = req.user?.id;
@@ -242,7 +304,10 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
       include: [{ model: Role, through: { attributes: [] } }]
     });
     
-    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+    const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
     
     // Validate roles: non-superadmin users cannot assign Super Admin role
     if (roles && Array.isArray(roles)) {
@@ -251,8 +316,63 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
             return;
         }
     }
-    
-    const existing = await User.findOne({ where: { username } });
+
+    let resolvedSubBrand: any = null;
+    if (isSuperAdmin) {
+      const rawId = sub_brand_id ?? subBrandId ?? null;
+      const nextId = rawId !== null && rawId !== undefined ? Number(rawId) : null;
+      const code = typeof (subBrandCode ?? prefix) === 'string' ? String(subBrandCode ?? prefix).trim() : '';
+
+      if (nextId && Number.isFinite(nextId) && nextId > 0) {
+        resolvedSubBrand = await SubBrand.findByPk(nextId);
+      } else if (code) {
+        resolvedSubBrand = await SubBrand.findOne({ where: { code } as any });
+      }
+
+      if (!resolvedSubBrand) {
+        sendError(res, 'Code1216', 400);
+        return;
+      }
+    } else {
+      const requesterTenantId = Number((requester as any)?.tenant_id ?? req.user?.tenant_id ?? null);
+      const requestedSubBrandIdRaw = sub_brand_id ?? subBrandId ?? null;
+      const requestedSubBrandId =
+        requestedSubBrandIdRaw !== null && requestedSubBrandIdRaw !== undefined ? Number(requestedSubBrandIdRaw) : null;
+
+      if (isOperator) {
+        const pickId =
+          requestedSubBrandId && Number.isFinite(requestedSubBrandId) && requestedSubBrandId > 0
+            ? requestedSubBrandId
+            : Number(req.user?.sub_brand_id ?? null);
+        if (!Number.isFinite(pickId) || pickId <= 0) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        resolvedSubBrand = await SubBrand.findByPk(pickId);
+        if (!resolvedSubBrand) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        const sbTenantId = Number((resolvedSubBrand as any).tenant_id ?? null);
+        if (!Number.isFinite(requesterTenantId) || requesterTenantId <= 0 || sbTenantId !== requesterTenantId) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+      } else {
+        const scopeSubBrandId = Number(req.user?.sub_brand_id ?? null);
+        if (!Number.isFinite(scopeSubBrandId) || scopeSubBrandId <= 0) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        resolvedSubBrand = await SubBrand.findByPk(scopeSubBrandId);
+        if (!resolvedSubBrand) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+      }
+    }
+
+    const existing = await User.findOne({ where: { username, sub_brand_id: resolvedSubBrand.id } as any });
     if (existing) {
         sendError(res, 'Code605', 400); // Username already exists
         return;
@@ -268,7 +388,9 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
         currency: currency || 'USD',
         status: 'active',
         token_version: 0,
-        api_key: generateApiKey()
+        api_key: generateApiKey(),
+        tenant_id: (resolvedSubBrand as any).tenant_id,
+        sub_brand_id: resolvedSubBrand.id,
     });
 
     if (roles && Array.isArray(roles)) {
@@ -312,7 +434,7 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     const { id } = req.params;
     // Map frontend payload keys to what we need
     // Frontend sends: username, fullName, status, roles (array of strings), password
-    const { username, password, full_name, fullName, roles, permissions, status, currency } = req.body;
+    const { username, password, full_name, fullName, roles, permissions, status, currency, sub_brand_id, subBrandId } = req.body;
     
     // Check if requester is Super Admin
     const requesterId = req.user?.id;
@@ -366,12 +488,50 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
     }
     if (currency !== undefined) user.currency = currency;
 
+    const targetSubBrandRaw = sub_brand_id ?? subBrandId;
+    if (targetSubBrandRaw !== undefined) {
+      if (!isSuperAdmin) {
+        sendError(res, 'Code102', 403);
+        return;
+      }
+      const nextSubBrandId = Number(targetSubBrandRaw);
+      if (!Number.isFinite(nextSubBrandId) || nextSubBrandId <= 0) {
+        sendError(res, 'Code1215', 400);
+        return;
+      }
+      const sb = await SubBrand.findByPk(nextSubBrandId);
+      if (!sb) {
+        sendError(res, 'Code1216', 404);
+        return;
+      }
+      (user as any).sub_brand_id = sb.id;
+      (user as any).tenant_id = (sb as any).tenant_id;
+    }
+
     await user.save();
 
-    //禁止修改roles - 角色权限是核心安全设置
+    // 角色修改策略：
+    // - 仅 Super Admin 可以修改角色
+    // - 非 Super Admin 如果前端传了 roles，直接忽略，不报错，保证资料更新可成功
     if (roles !== undefined) {
-      sendError(res, 'Code611', 400); // Roles cannot be modified
-      return;
+      if (isSuperAdmin) {
+        if (Array.isArray(roles)) {
+          // Super Admin 不得将目标用户设置为 Super Admin 以外？这里允许 Super Admin 完整管理
+          const roleObjects = await Role.findAll({
+            where: {
+              name: {
+                [Op.in]: roles
+              }
+            }
+          });
+          await UserRole.destroy({ where: { userId: user.id } });
+          for (const role of roleObjects) {
+            await UserRole.create({ userId: user.id, roleId: role.id });
+          }
+        }
+      } else {
+        // 非 Super Admin：忽略 roles 字段
+      }
     }
 
     // Update Permissions (Input is array of Permission Slugs)

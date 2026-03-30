@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import { Game, Product } from '../models';
 import { VendorFactory } from '../services/vendor/VendorFactory';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 
 /**
  * Generate unique request ID for Joker API calls
@@ -17,8 +18,12 @@ const generateRequestId = (): string => {
   return result;
 };
 
-const getVendor = async (gameId: number, res: Response) => {
-  const game = await Game.findByPk(gameId, { include: [{ model: Product, attributes: ['providerCode'] }] } as any);
+const getVendor = async (req: AuthRequest, gameId: number, res: Response) => {
+  const scope = getTenancyScopeOrThrow(req);
+  const game = await Game.findOne({
+    where: withTenancyWhere(scope, { id: gameId }),
+    include: [{ model: Product, attributes: ['providerCode'], required: false }],
+  } as any);
   if (!game) {
     sendError(res, 'Code1008', 404);
     return null;
@@ -64,7 +69,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.createPlayer(username);
@@ -98,7 +103,7 @@ export const setPlayerStatus = async (req: AuthRequest, res: Response): Promise<
       return;
     }
 
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.setPlayerStatus(String(username), status as 'Active' | 'Suspend');
@@ -135,7 +140,7 @@ export const setPlayerPassword = async (req: AuthRequest, res: Response): Promis
       return;
     }
 
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.setPlayerPassword(String(username), password);
@@ -166,7 +171,7 @@ export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<voi
   try {
     const { gameId, username } = req.params;
 
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.logoutPlayer(String(username));
@@ -198,7 +203,7 @@ export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<voi
 export const getPlayerBalance = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { gameId, username } = req.params;
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.getBalance(String(username));
@@ -222,7 +227,7 @@ export const deposit = async (req: AuthRequest, res: Response): Promise<void> =>
       sendError(res, 'Code9005', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const requestId = generateRequestId();
@@ -255,7 +260,7 @@ export const withdraw = async (req: AuthRequest, res: Response): Promise<void> =
       sendError(res, 'Code9005', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const requestId = generateRequestId();
@@ -282,7 +287,7 @@ export const withdraw = async (req: AuthRequest, res: Response): Promise<void> =
 export const withdrawAll = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { gameId, username } = req.params;
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const requestId = generateRequestId();
@@ -309,7 +314,7 @@ export const withdrawAll = async (req: AuthRequest, res: Response): Promise<void
 export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { gameId, requestId } = req.params;
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -334,7 +339,7 @@ export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<v
 export const getGameList = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { gameId } = req.params;
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -363,7 +368,7 @@ export const launchGame = async (req: AuthRequest, res: Response): Promise<void>
       sendError(res, 'Code9004', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.launchGame(username, gameCode, {
@@ -394,7 +399,7 @@ export const getTransactionsByHour = async (req: AuthRequest, res: Response): Pr
       sendError(res, 'Code9004', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -419,7 +424,7 @@ export const getTransactionsByMinute = async (req: AuthRequest, res: Response): 
       sendError(res, 'Code9004', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -448,7 +453,7 @@ export const getWinloss = async (req: AuthRequest, res: Response): Promise<void>
       sendError(res, 'Code9004', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -477,7 +482,7 @@ export const getHistoryUrl = async (req: AuthRequest, res: Response): Promise<vo
       sendError(res, 'Code9004', 400);
       return;
     }
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;
@@ -502,7 +507,7 @@ export const getHistoryUrl = async (req: AuthRequest, res: Response): Promise<vo
 export const getJackpot = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { gameId } = req.params;
-    const vendor = await getVendor(Number(gameId), res);
+    const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const vendorAny = vendor as any;

@@ -10,6 +10,8 @@ class AuditLog extends Model {
   public new_data!: any;
   public ip_address!: string;
   public created_at!: Date;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
 }
 
 AuditLog.init({
@@ -38,7 +40,15 @@ AuditLog.init({
   ip_address: {
       type: DataTypes.STRING(255),
       allowNull: true,
-  }
+  },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
 }, {
   sequelize,
   modelName: 'AuditLog',
@@ -46,6 +56,11 @@ AuditLog.init({
   timestamps: true,
   updatedAt: false,
   createdAt: 'created_at',
+  indexes: [
+    { fields: ['tenant_id', 'sub_brand_id'] },
+    { fields: ['sub_brand_id', 'created_at'] },
+    { fields: ['user_id', 'created_at'] },
+  ],
   hooks: {
     beforeCreate: (instance: AuditLog) => {
       const serialize = (value: any): string => {

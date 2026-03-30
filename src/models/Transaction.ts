@@ -20,6 +20,8 @@ class Transaction extends Model {
   public ip_address!: string | null;
   public bank_balance_after!: number;
   public game_balance_after!: number;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
 }
 
 Transaction.init({
@@ -87,6 +89,14 @@ Transaction.init({
     type: DataTypes.DECIMAL(15, 2),
     allowNull: true,
   },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
 }, {
   sequelize,
   modelName: 'Transaction',
@@ -94,6 +104,10 @@ Transaction.init({
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',
+  indexes: [
+    { fields: ['tenant_id', 'sub_brand_id'] },
+    { fields: ['sub_brand_id', 'created_at'] },
+  ],
   hooks: {
     beforeCreate: (transaction) => {
       if (!transaction.id) {

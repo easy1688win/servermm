@@ -127,7 +127,7 @@ export const create = async (req: AuthRequest, res: Response): Promise<void> => 
       icon,
       status,
       vendorFields,
-    });
+    } as any);
 
     await logAudit(
       req.user?.id || null,

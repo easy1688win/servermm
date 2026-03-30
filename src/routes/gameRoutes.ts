@@ -9,14 +9,14 @@ router.use(authenticateToken);
 
 router.get(
   '/context',
-  requireAnyPermission(['route:settings', 'action:settings_manage']),
+  requireAnyPermission(['view:games', 'route:settings', 'action:settings_manage']),
   getGamesContext,
 );
 router.get('/', getAllGames);
-router.post('/', requirePermission('action:settings_manage'), createGame); // Or appropriate permission
-router.put('/:id', requirePermission('action:settings_manage'), update);
-router.delete('/:id', requirePermission('action:settings_manage'), deleteGame);
-router.post('/:id/adjust', requirePermission('action:settings_manage'), adjustBalance); // Maybe specific permission for adjustment
+router.post('/', requireAnyPermission(['action:game_operational', 'action:settings_manage']), createGame); // Or appropriate permission
+router.put('/:id', requireAnyPermission(['action:game_operational', 'action:settings_manage']), update);
+router.delete('/:id', requireAnyPermission(['action:game_operational', 'action:settings_manage']), deleteGame);
+router.post('/:id/adjust', requireAnyPermission(['action:game_operational', 'action:settings_manage']), adjustBalance); // Maybe specific permission for adjustment
 router.get('/adjustments', getGameAdjustments);
 
 export default router;

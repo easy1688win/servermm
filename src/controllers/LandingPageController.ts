@@ -1,10 +1,12 @@
 import { Response } from 'express';
 import { Op } from 'sequelize';
 import sequelize from '../config/database';
-import { LandingPage, LandingPageEvent, LandingPageVisit, Setting, User } from '../models';
+import { LandingPage, LandingPageEvent, LandingPageVisit, Role, Setting, SubBrand, User } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
+import { getSettingValue } from '../services/SettingService';
 
 const tryDecryptIp = (cipher: any): string | null => {
   if (typeof cipher !== 'string') return null;
@@ -185,6 +187,7 @@ const parseSourceOptions = (raw: any): string[] => {
 
 export const listLandingPages = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const qRaw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const statusRaw = typeof req.query.status === 'string' ? req.query.status.trim().toLowerCase() : '';
     const sourceRaw = typeof req.query.source === 'string' ? req.query.source.trim() : '';
@@ -210,13 +213,15 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
 
     const [result, sourceSetting] = await Promise.all([
       LandingPage.findAndCountAll({
-        where,
-        include: [{ model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] }],
+        where: withTenancyWhere(scope, where),
+        include: [
+          { model: User, as: 'operator', required: false, where: withTenancyWhere(scope) as any, attributes: ['id', 'username', 'full_name'] },
+        ],
         order: [['updated_at', 'DESC']],
         limit: pageSize,
         offset,
       }),
-      Setting.findByPk('referralSources'),
+      getSettingValue(scope, 'referralSources'),
     ]);
 
     const items = result.rows.map((row: any) => {
@@ -234,13 +239,14 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
       };
     });
 
-    const rawSourceOptions = (sourceSetting as any)?.value;
+    const rawSourceOptions = sourceSetting as any;
     let sourceOptions = parseSourceOptions(rawSourceOptions);
     if (sourceOptions.length === 0) {
       try {
-        const [rows] = await sequelize.query(
-          "SELECT DISTINCT source FROM landing_pages WHERE source IS NOT NULL AND TRIM(source) <> '' ORDER BY source ASC"
-        );
+        const [rows] = (await sequelize.query<any>(
+          "SELECT DISTINCT source FROM landing_pages WHERE tenant_id = :tenantId AND sub_brand_id = :subBrandId AND source IS NOT NULL AND TRIM(source) <> '' ORDER BY source ASC",
+          { replacements: { tenantId: scope.tenant_id, subBrandId: scope.sub_brand_id } } as any,
+        )) as any;
         const dbSources = Array.isArray(rows) ? rows.map((r: any) => normalizeSource(r?.source)).filter(Boolean) : [];
         sourceOptions = dbSources;
       } catch {
@@ -250,7 +256,50 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
       a.localeCompare(b, undefined, { sensitivity: 'base' })
     );
 
-    sendSuccess(res, 'Code1', { items, total: result.count, page, pageSize, sourceOptions });
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
+        : null;
+
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let rows: any[] = [];
+        if (isSuperAdmin) {
+          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch {
+    }
+
+    sendSuccess(res, 'Code1', { items, total: result.count, page, pageSize, sourceOptions, subBrandOptions });
   } catch {
     sendError(res, 'LP101', 500);
   }
@@ -258,13 +307,14 @@ export const listLandingPages = async (req: AuthRequest, res: Response): Promise
 
 export const getLandingPage = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
       sendError(res, 'LP104', 400);
       return;
     }
 
-    const page = await LandingPage.findByPk(id);
+    const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
     if (!page) {
       sendError(res, 'LP105', 404);
       return;
@@ -294,6 +344,7 @@ export const getLandingPage = async (req: AuthRequest, res: Response): Promise<v
 
 export const createLandingPage = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
     const pageUrl = typeof req.body?.page_url === 'string' ? req.body.page_url.trim() : '';
     const source = typeof req.body?.source === 'string' ? req.body.source.trim() : null;
@@ -322,7 +373,7 @@ export const createLandingPage = async (req: AuthRequest, res: Response): Promis
 
     const operatorId = req.user?.id ? Number(req.user.id) : null;
 
-    const created = await LandingPage.create({
+    const created = await LandingPage.create(withTenancyCreate(scope, {
       name,
       page_url: pageUrl,
       source,
@@ -336,7 +387,7 @@ export const createLandingPage = async (req: AuthRequest, res: Response): Promis
       primary_cta_url: primary_cta_url && primary_cta_url.length > 0 ? primary_cta_url.slice(0, 2048) : null,
       secondary_cta_text: secondary_cta_text && secondary_cta_text.length > 0 ? secondary_cta_text.slice(0, 60) : null,
       secondary_cta_url: secondary_cta_url && secondary_cta_url.length > 0 ? secondary_cta_url.slice(0, 2048) : null,
-    } as any);
+    } as any));
 
     sendSuccess(res, 'Code1', created, undefined, 201);
   } catch {
@@ -346,13 +397,14 @@ export const createLandingPage = async (req: AuthRequest, res: Response): Promis
 
 export const updateLandingPage = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
       sendError(res, 'LP104', 400);
       return;
     }
 
-    const page = await LandingPage.findByPk(id);
+    const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
     if (!page) {
       sendError(res, 'LP105', 404);
       return;
@@ -427,21 +479,22 @@ export const updateLandingPage = async (req: AuthRequest, res: Response): Promis
 
 export const deleteLandingPage = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
       sendError(res, 'LP107', 400);
       return;
     }
 
-    const page = await LandingPage.findByPk(id);
+    const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
     if (!page) {
       sendError(res, 'LP105', 404);
       return;
     }
 
     await sequelize.transaction(async (t) => {
-      await LandingPageVisit.destroy({ where: { landing_page_id: id }, transaction: t } as any);
-      await LandingPageEvent.destroy({ where: { landing_page_id: id }, transaction: t } as any);
+      await LandingPageVisit.destroy({ where: withTenancyWhere(scope, { landing_page_id: id }), transaction: t } as any);
+      await LandingPageEvent.destroy({ where: withTenancyWhere(scope, { landing_page_id: id }), transaction: t } as any);
       await page.destroy({ transaction: t } as any);
     });
     sendSuccess(res, 'Code1', { ok: true });
@@ -452,9 +505,16 @@ export const deleteLandingPage = async (req: AuthRequest, res: Response): Promis
 
 export const getLandingAnalytics = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
       sendError(res, 'LP104', 400);
+      return;
+    }
+
+    const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
+    if (!page) {
+      sendError(res, 'LP105', 404);
       return;
     }
 
@@ -464,8 +524,8 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
     const start = startRaw ? new Date(startRaw) : null;
     const end = endRaw ? new Date(endRaw) : null;
 
-    const whereRange: any = { landing_page_id: id };
-    const whereEventRange: any = { landing_page_id: id };
+    const whereRange: any = withTenancyWhere(scope, { landing_page_id: id });
+    const whereEventRange: any = withTenancyWhere(scope, { landing_page_id: id });
     if (start && !Number.isNaN(start.getTime())) {
       whereRange.created_at = { ...(whereRange.created_at || {}), [Op.gte]: start };
       whereEventRange.created_at = { ...(whereEventRange.created_at || {}), [Op.gte]: start };
@@ -596,9 +656,16 @@ export const getLandingAnalytics = async (req: AuthRequest, res: Response): Prom
 
 export const getLandingVisitDetails = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
       sendError(res, 'LP104', 400);
+      return;
+    }
+
+    const page = await LandingPage.findOne({ where: withTenancyWhere(scope, { id }) } as any);
+    if (!page) {
+      sendError(res, 'LP105', 404);
       return;
     }
 
@@ -615,7 +682,7 @@ export const getLandingVisitDetails = async (req: AuthRequest, res: Response): P
     const start = startRaw ? new Date(startRaw) : null;
     const end = endRaw ? new Date(endRaw) : null;
 
-    const where: any = { landing_page_id: id };
+    const where: any = withTenancyWhere(scope, { landing_page_id: id });
     if (start && !Number.isNaN(start.getTime())) {
       where.created_at = { ...(where.created_at || {}), [Op.gte]: start };
     }

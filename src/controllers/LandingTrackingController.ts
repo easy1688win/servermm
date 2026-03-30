@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { UAParser } from 'ua-parser-js';
-import { LandingPageEvent, LandingPageVisit } from '../models';
+import { LandingPage, LandingPageEvent, LandingPageVisit } from '../models';
 import { encrypt, isEncrypted } from '../utils/encryption';
 import { getCache, setCache } from '../services/CacheService';
 
@@ -137,6 +137,27 @@ const dedupeOnce = (key: string, ttlSeconds: number): boolean => {
   return false;
 };
 
+const resolveLandingScope = async (landingPageId: number): Promise<{ tenant_id: number | null; sub_brand_id: number | null }> => {
+  const cacheKey = `lp_scope:${landingPageId}`;
+  const cached = getCache(cacheKey) as any;
+  if (cached && typeof cached === 'object') {
+    return {
+      tenant_id: Number(cached.tenant_id) || null,
+      sub_brand_id: Number(cached.sub_brand_id) || null,
+    };
+  }
+  try {
+    const page = await LandingPage.findByPk(landingPageId, { attributes: ['id', 'tenant_id', 'sub_brand_id'] } as any);
+    const payload = page
+      ? { tenant_id: Number((page as any).tenant_id) || null, sub_brand_id: Number((page as any).sub_brand_id) || null }
+      : { tenant_id: null, sub_brand_id: null };
+    setCache(cacheKey, payload, 300);
+    return payload;
+  } catch {
+    return { tenant_id: null, sub_brand_id: null };
+  }
+};
+
 export const trackLandingPageViewGif = async (req: Request, res: Response) => {
   const landingPageId = Number(req.query.lp);
   if (Number.isNaN(landingPageId)) {
@@ -179,6 +200,7 @@ export const trackLandingPageViewGif = async (req: Request, res: Response) => {
       : null;
 
   const record = {
+    ...(await resolveLandingScope(landingPageId)),
     landing_page_id: landingPageId,
     session_id: sessionId,
     ip_hash: ipHash,
@@ -265,6 +287,7 @@ export const trackLandingEventGif = async (req: Request, res: Response) => {
   };
 
   const record = {
+    ...(await resolveLandingScope(landingPageId)),
     landing_page_id: landingPageId,
     event_name: eventName,
     element_id: elementId,

@@ -1,5 +1,5 @@
 import sequelize from '../config/database';
-import { User, Permission, Role, Setting } from '../models';
+import { User, Permission, Role, Setting, Tenant, SubBrand, Player, Game, Product, Transaction, BankAccount, AuditLog, LandingPage, LandingPageVisit, LandingPageEvent, PlayerStats, GameAdjustment } from '../models';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
@@ -171,6 +171,30 @@ async function initDb() {
     await sequelize.sync({ alter: true });
     console.log('Database synced.');
 
+    const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim() || 'sparkx';
+    const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim() || 'sparkx';
+    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim() || 'sparkx';
+    const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim() || 'sparkx';
+
+    const [defaultTenant] = await Tenant.findOrCreate({
+      where: { prefix: defaultTenantPrefix },
+      defaults: {
+        prefix: defaultTenantPrefix,
+        name: defaultTenantName,
+        status: 'active',
+      },
+    });
+
+    const [defaultSubBrand] = await SubBrand.findOrCreate({
+      where: { code: defaultSubBrandCode },
+      defaults: {
+        tenant_id: defaultTenant.id,
+        code: defaultSubBrandCode,
+        name: defaultSubBrandName,
+        status: 'active',
+      },
+    });
+
     // Seed Permissions
     for (const p of PERMISSIONS) {
       await Permission.findOrCreate({
@@ -243,6 +267,9 @@ async function initDb() {
         status: 'active',
         full_name: adminFullName,
         api_key: generateApiKey(),
+        tenant_id: defaultTenant.id,
+        sub_brand_id: defaultSubBrand.id,
+        is_super_admin: true,
       },
     });
 
@@ -276,6 +303,17 @@ async function initDb() {
       console.log('Admin API key generated.');
     }
 
+    if (!admin.tenant_id) {
+      admin.tenant_id = defaultTenant.id as any;
+    }
+    if (!admin.sub_brand_id) {
+      admin.sub_brand_id = defaultSubBrand.id as any;
+    }
+    if (!admin.is_super_admin) {
+      admin.is_super_admin = true as any;
+    }
+    await admin.save();
+
     // Assign Super Admin role to admin
     const superAdminRole = await Role.findOne({ where: { name: 'Super Admin' } });
     if (superAdminRole) {
@@ -283,6 +321,61 @@ async function initDb() {
        await admin.setRoles([superAdminRole]);
        console.log('Admin assigned Super Admin role.');
     }
+
+    const usersMissingScope: any[] = await User.findAll({
+      where: { tenant_id: null } as any,
+    });
+    for (const u of usersMissingScope) {
+      u.tenant_id = defaultTenant.id as any;
+      u.sub_brand_id = defaultSubBrand.id as any;
+      await u.save();
+    }
+
+    await Player.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await Game.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await Product.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await Transaction.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await BankAccount.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+
+    await AuditLog.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await LandingPage.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await LandingPageVisit.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await LandingPageEvent.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await PlayerStats.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
+    await GameAdjustment.update(
+      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
+      { where: { tenant_id: null } as any },
+    );
     
     const usersWithoutKey: any[] = await User.findAll({ where: { api_key: null } as any });
     for (const user of usersWithoutKey) {

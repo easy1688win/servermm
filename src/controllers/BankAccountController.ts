@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { BankAccount, Transaction, Player, User, BankCatalog } from '../models';
+import { BankAccount, Transaction, Player, Role, SubBrand, User, BankCatalog } from '../models';
 import { Op } from 'sequelize';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
@@ -7,6 +7,7 @@ import sequelize from '../config/database';
 import { sanitizePlayerForResponse } from './PlayerController';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
+import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
 
 const resolveOperatorName = (op: any): string | null => {
   if (!op || typeof op !== 'object') return null;
@@ -70,7 +71,10 @@ export const sanitizeBankAccountForResponse = (account: any, permissions: string
 
 export const getBankAccounts = async (req: AuthRequest, res: Response) => {
   try {
-    const accounts = (await BankAccount.findAll()).filter((account: any) => account.status !== 'banned');
+    const scope = getTenancyScopeOrThrow(req);
+    const accounts = await BankAccount.findAll({
+      where: withTenancyWhere(scope, { status: { [Op.ne]: 'banned' } } as any),
+    });
     
     const userPermissions = req.user?.permissions || [];
     const sanitizedAccounts = accounts.map((account: any) => sanitizeBankAccountForResponse(account, userPermissions));
@@ -83,6 +87,7 @@ export const getBankAccounts = async (req: AuthRequest, res: Response) => {
 
 export const getBankContext = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const canViewBalance = userPermissions.includes('view:bank_balance');
     const canViewSensitive = userPermissions.includes('view:sensitive_logs');
@@ -199,9 +204,9 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
     } as any;
 
     const [accountsRaw, txResult, catalog, allOperators] = await Promise.all([
-      BankAccount.findAll(),
+      BankAccount.findAll({ where: withTenancyWhere(scope) } as any),
       Transaction.findAndCountAll({
-        where,
+        where: withTenancyWhere(scope, where),
         include: [
           { model: BankAccount },
           includePlayer,
@@ -215,11 +220,13 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
       BankCatalog.findAll({
         order: [['name', 'ASC']],
       }),
-      canViewUsers ? User.findAll({
-        attributes: ['id', 'username', 'full_name'],
-        where: { status: 'active' },
-        order: [['username', 'ASC']],
-      }) : []
+      canViewUsers
+        ? User.findAll({
+            attributes: ['id', 'username', 'full_name'],
+            where: { tenant_id: scope.tenant_id, status: 'active' } as any,
+            order: [['username', 'ASC']],
+          } as any)
+        : []
     ]);
 
     const accounts = (accountsRaw as any[]).filter((account) => account.status !== 'banned');
@@ -243,6 +250,50 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
        if (name) {
           operatorOptions = [{ id: req.user.id, name }];
        }
+    }
+
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
+        : null;
+
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let rows: any[] = [];
+        if (isSuperAdmin) {
+          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (rows as any[]).map((sb: any) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch (e) {
+      void e;
     }
 
     const shapedTransactions = transactions.map((tx: any) => {
@@ -319,6 +370,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
       transactions: shapedTransactions,
       bankCatalog,
       operatorOptions,
+      subBrandOptions,
       pagination: {
         page,
         pageSize,
@@ -333,6 +385,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
 
 export const createBankAccount = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { bank_name, alias, account_number, total_balance } = req.body;
 
     let cleaned = typeof account_number === 'string' ? account_number.replace(/\D/g, '') : '';
@@ -342,7 +395,7 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const allAccounts = await BankAccount.findAll();
+    const allAccounts = await BankAccount.findAll({ where: withTenancyWhere(scope) } as any);
     const existing = allAccounts.find(
       (a: any) => a.bank_name === bank_name && a.account_number === cleaned
     );
@@ -363,13 +416,15 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const account = await BankAccount.create({
-      bank_name,
-      alias,
-      account_number: cleaned,
-      total_balance: total_balance || 0,
-      status: 'active',
-    });
+    const account = await BankAccount.create(
+      withTenancyCreate(scope, {
+        bank_name,
+        alias,
+        account_number: cleaned,
+        total_balance: total_balance || 0,
+        status: 'active',
+      }),
+    );
 
     await logAudit(req.user?.id, 'BANK_CREATE', null, account.toJSON(), getClientIp(req) || undefined);
 
@@ -382,9 +437,10 @@ export const createBankAccount = async (req: AuthRequest, res: Response) => {
 
 export const updateBankAccount = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { id } = req.params;
     const { bank_name, alias, status, account_number } = req.body;
-    const account = await BankAccount.findByPk(Number(id));
+    const account = await BankAccount.findOne({ where: withTenancyWhere(scope, { id: Number(id) }) } as any);
     
     if (!account) {
       sendError(res, 'Code705', 404);
@@ -412,8 +468,9 @@ export const updateBankAccount = async (req: AuthRequest, res: Response) => {
 
 export const deleteBankAccount = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { id } = req.params;
-    const account = await BankAccount.findByPk(Number(id));
+    const account = await BankAccount.findOne({ where: withTenancyWhere(scope, { id: Number(id) }) } as any);
 
     if (!account) {
       sendError(res, 'Code705', 404);
@@ -436,11 +493,13 @@ export const deleteBankAccount = async (req: AuthRequest, res: Response) => {
 export const adjustBalance = async (req: AuthRequest, res: Response) => {
   const t = await sequelize.transaction();
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { id } = req.params;
     const { amount, reason } = req.body; // amount can be positive or negative
     const clientIp = getClientIp(req);
     
-    const account = await BankAccount.findByPk(Number(id), {
+    const account = await BankAccount.findOne({
+      where: withTenancyWhere(scope, { id: Number(id) }),
       transaction: t,
       lock: t.LOCK.UPDATE,
     } as any);

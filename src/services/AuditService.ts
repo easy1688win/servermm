@@ -1,4 +1,4 @@
-import { AuditLog } from '../models';
+import { AuditLog, User } from '../models';
 import { isEncrypted, encrypt } from '../utils/encryption';
 import { Request } from 'express';
 
@@ -138,7 +138,8 @@ export const logAudit = async (
   action: string,
   originalData: any = null,
   newData: any = null,
-  ipAddress: string | null = null
+  ipAddress: string | null = null,
+  scope?: { tenant_id?: number | null; sub_brand_id?: number | null } | null
 ) => {
   try {
     const maskedOriginal = maskSensitive(
@@ -158,12 +159,27 @@ export const logAudit = async (
     const encryptedIp =
       ipAddress && !isEncrypted(ipAddress) ? encrypt(ipAddress) : ipAddress;
 
+    let tenant_id: number | null = scope && scope.tenant_id != null ? Number(scope.tenant_id) : null;
+    let sub_brand_id: number | null = scope && scope.sub_brand_id != null ? Number(scope.sub_brand_id) : null;
+    if ((!tenant_id || !sub_brand_id) && userId) {
+      try {
+        const u = await User.findByPk(userId, { attributes: ['id', 'tenant_id', 'sub_brand_id'] } as any);
+        if (u) {
+          tenant_id = Number((u as any).tenant_id) || null;
+          sub_brand_id = Number((u as any).sub_brand_id) || null;
+        }
+      } catch {
+      }
+    }
+
     await AuditLog.create({
       userId,
       action,
       original_data: serializedOriginal,
       new_data: serializedNew,
       ip_address: encryptedIp || null,
+      tenant_id: tenant_id || null,
+      sub_brand_id: sub_brand_id || null,
     });
   } catch (error) {
   }

@@ -3,6 +3,8 @@ import sequelize from '../config/database';
 
 class LandingPageVisit extends Model {
   public id!: number;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
   public landing_page_id!: number;
   public session_id!: string | null;
   public ip_hash!: string;
@@ -34,6 +36,14 @@ LandingPageVisit.init(
       type: DataTypes.INTEGER,
       autoIncrement: true,
       primaryKey: true,
+    },
+    tenant_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    sub_brand_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
     },
     landing_page_id: {
       type: DataTypes.INTEGER,
@@ -133,6 +143,11 @@ LandingPageVisit.init(
     timestamps: true,
     updatedAt: false,
     createdAt: 'created_at',
+    indexes: [
+      { fields: ['tenant_id', 'sub_brand_id'] },
+      { fields: ['sub_brand_id', 'created_at'] },
+      { fields: ['landing_page_id', 'created_at'] },
+    ],
   }
 );
 

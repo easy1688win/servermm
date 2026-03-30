@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { getCache, setCache } from '../services/CacheService';
-import { User, Role, Permission } from '../models';
+import { User, Role, Permission, SubBrand } from '../models';
 import UserSession from '../models/UserSession';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
 import { sendError } from '../utils/response';
@@ -91,7 +91,9 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
       let permissions: string[];
 
       if (cachedPermissions) {
-        user = await User.findByPk(userId);
+        user = await User.findByPk(userId, {
+          include: [{ model: Role, through: { attributes: [] }, required: false }],
+        } as any);
         if (!user) {
           sendError(res, 'Code104', 401);
           return;
@@ -182,12 +184,48 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
         setCache(cacheKey, permissions);
       }
 
+      const isSuperAdmin = Boolean(user.is_super_admin) || Boolean(user?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+      const isOperator = Boolean(user?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+      let tenantId = user.tenant_id;
+      let subBrandId = user.sub_brand_id;
+
+      const rawOverride = req.headers['x-sub-brand-id'];
+      if (typeof rawOverride === 'string' && rawOverride.trim().length > 0) {
+        const overrideId = Number(rawOverride);
+        if (Number.isFinite(overrideId) && overrideId > 0) {
+          const sb = await SubBrand.findByPk(overrideId);
+          if (!sb) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+          if (isSuperAdmin) {
+            tenantId = (sb as any).tenant_id;
+            subBrandId = sb.id;
+          } else if (isOperator) {
+            const sbTenantId = Number((sb as any).tenant_id ?? null);
+            const userTenantId = Number(user.tenant_id ?? null);
+            if (!Number.isFinite(sbTenantId) || !Number.isFinite(userTenantId) || sbTenantId !== userTenantId) {
+              sendError(res, 'Code102', 403);
+              return;
+            }
+            tenantId = userTenantId;
+            subBrandId = sb.id;
+          } else {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+        }
+      }
+
       req.user = {
         id: user.id,
         username: user.username,
         full_name: user.full_name,
         status: user.status,
-        permissions
+        permissions,
+        tenant_id: tenantId ?? null,
+        sub_brand_id: subBrandId ?? null,
+        is_super_admin: isSuperAdmin,
       };
       next();
     } catch (dbError) {

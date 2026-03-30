@@ -5,7 +5,7 @@ import { sendError } from '../utils/response';
 // 通用API速率限制 - 适用于大部分API端点
 export const generalRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000, // 15分钟
-  max: 100, // 每个IP在15分钟内最多100次请求
+  max: 1000, // 每个IP在15分钟内最多100次请求
   message: {
     code: 2,
     key: 'Code429',
@@ -41,7 +41,7 @@ export const strictRateLimit = rateLimit({
 // 中等级速率限制 - 适用于一般操作
 export const mediumRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000, // 15分钟
-  max: 50, // 每个IP在15分钟内最多50次请求
+  max: 1000, // 每个IP在15分钟内最多50次请求
   message: {
     code: 2,
     key: 'Code429',
@@ -59,7 +59,7 @@ export const mediumRateLimit = rateLimit({
 // 宽松速率限制 - 适用于数据读取操作
 export const looseRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000, // 15分钟
-  max: 200, // 每个IP在15分钟内最多200次请求
+  max: 1000, // 每个IP在15分钟内最多200次请求
   message: {
     code: 2,
     key: 'Code429',

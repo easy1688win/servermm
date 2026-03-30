@@ -13,6 +13,8 @@ class Game extends Model {
   public product_id!: number | null;
   public vendor_config!: any | null;
   public use_api!: boolean;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
 }
 
 Game.init({
@@ -24,7 +26,14 @@ Game.init({
   name: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
+  },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
   },
   icon: {
     type: DataTypes.TEXT('medium'),
@@ -67,6 +76,11 @@ Game.init({
   sequelize,
   modelName: 'Game',
   tableName: 'games',
+  indexes: [
+    { unique: true, fields: ['sub_brand_id', 'name'] },
+    { fields: ['tenant_id', 'sub_brand_id'] },
+    { fields: ['sub_brand_id', 'status'] },
+  ],
 });
 
 export default Game;

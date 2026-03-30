@@ -17,6 +17,9 @@ class User extends Model {
   public currency!: 'USD' | 'MYR';
   public two_factor_secret!: string | null;
   public two_factor_enabled!: boolean;
+  public tenant_id!: number | null;
+  public sub_brand_id!: number | null;
+  public is_super_admin!: boolean;
 
   // Associations
   public Roles?: Role[];
@@ -32,7 +35,6 @@ User.init({
   username: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
   },
   password_hash: {
     type: DataTypes.STRING,
@@ -77,10 +79,26 @@ User.init({
     type: DataTypes.BOOLEAN,
     defaultValue: false,
   },
+  tenant_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  sub_brand_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
+  is_super_admin: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+  },
 }, {
   sequelize,
   modelName: 'User',
   tableName: 'users',
+  indexes: [
+    { unique: true, fields: ['sub_brand_id', 'username'] },
+  ],
   hooks: {
     beforeCreate: (instance: User) => {
       if (instance.api_key && !isEncrypted(instance.api_key)) {
