@@ -90,8 +90,21 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       if (!game) return false;
       if (!game.use_api) return false;
 
-      const vendorConfig = game.vendor_config;
-      if (!vendorConfig || typeof vendorConfig !== 'object') return false;
+      let vendorConfig: any = game.vendor_config;
+      if (typeof vendorConfig === 'string') {
+        const s = vendorConfig.trim();
+        if (s.startsWith('{') || s.startsWith('[')) {
+          try {
+            vendorConfig = JSON.parse(s);
+          } catch {
+            vendorConfig = null;
+          }
+        } else {
+          vendorConfig = null;
+        }
+      }
+
+      if (!vendorConfig || typeof vendorConfig !== 'object' || Array.isArray(vendorConfig)) return false;
 
       const { apiUrl, appId, signatureKey } = vendorConfig as Record<string, string>;
       return !!(apiUrl && appId && signatureKey);

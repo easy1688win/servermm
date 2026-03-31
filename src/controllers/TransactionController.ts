@@ -147,6 +147,7 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
     json.ip = ip;
     json.game_name = gameName;
     json.game_account_id = gameAccountId;
+    json.message = json.vendor_message ?? null;
     
     // 确保walve字段被包含
     json.walve = json.walve ?? 0;
@@ -1322,6 +1323,9 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         if (!game_account_id || typeof game_account_id !== 'string') {
           throw new Error('Game account is required for vendor transfer');
         }
+        const vendorUsername = game_account_id;
+        let vendorCreditBefore: number | null = null;
+        let vendorCreditAfter: number | null = null;
         let vendorOk = false;
         const throwApiError = (vendorMessage?: string) => {
           const e: any = new Error('API ERROR');
@@ -1350,14 +1354,36 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           }
           return false;
         };
+        try {
+          const bal = await vendor.getBalance(vendorUsername);
+          if (bal?.success && typeof (bal as any)?.credit === 'number' && Number.isFinite((bal as any).credit)) {
+            vendorCreditBefore = Number((bal as any).credit);
+          }
+          await Transaction.update(
+            { vendor_credit_before: vendorCreditBefore, vendor_message: bal?.message || bal?.error || null },
+            { where: { id: pendingTransaction.id } },
+          );
+          await pendingTransaction.reload();
+        } catch {
+        }
+
+        let vendorMessageToPersist: string | null = null;
         if (type === 'DEPOSIT') {
           let vendorMessage: string | undefined;
           let needVerify = false;
           try {
-            const v = await vendor.deposit(game_account_id, amounts.vendorTransfer, requestId);
+            const v = await vendor.deposit(vendorUsername, amounts.vendorTransfer, requestId);
             vendorOk = !!v.success;
+            vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
+            if (v.success) {
+              if (typeof (v as any).beforeCredit === 'number' && Number.isFinite((v as any).beforeCredit)) {
+                vendorCreditBefore = Number((v as any).beforeCredit);
+              }
+              if (typeof (v as any).credit === 'number' && Number.isFinite((v as any).credit)) {
+                vendorCreditAfter = Number((v as any).credit);
+              }
+            }
             if (!vendorOk) {
-              vendorMessage = v.error || v.message;
               needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
             }
           } catch (e: any) {
@@ -1365,16 +1391,57 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             vendorMessage = String(e?.message ?? e ?? '');
             needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? true;
           }
-          if (!vendorOk && needVerify) vendorOk = await verifyIfSupported();
+          if (!vendorOk && needVerify) {
+            vendorOk = await verifyIfSupported();
+            if (vendorOk && !vendorMessage) vendorMessage = 'VERIFIED';
+          }
+          if (vendorOk && !vendorMessage) vendorMessage = 'OK';
+          vendorMessageToPersist = vendorMessage || null;
+          try {
+            if (vendorOk && vendorCreditAfter == null) {
+              const bal2 = await vendor.getBalance(vendorUsername);
+              if (bal2?.success && typeof (bal2 as any)?.credit === 'number' && Number.isFinite((bal2 as any).credit)) {
+                vendorCreditAfter = Number((bal2 as any).credit);
+              }
+              if (vendorMessageToPersist == null) vendorMessageToPersist = bal2?.message || null;
+            }
+            await Transaction.update(
+              { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore, vendor_credit_after: vendorCreditAfter },
+              { where: { id: pendingTransaction.id } },
+            );
+            await pendingTransaction.reload();
+          } catch {
+          }
           if (!vendorOk) throwApiError(vendorMessage);
         } else if (type === 'WITHDRAWAL' || type === 'WALVE') {
           let vendorMessage: string | undefined;
           let needVerify = false;
+          if (vendorCreditBefore != null && Number.isFinite(vendorCreditBefore) && vendorCreditBefore < Number(amounts.vendorTransfer)) {
+            vendorMessage = 'Insufficient Credit';
+            vendorMessageToPersist = vendorMessage;
+            try {
+              await Transaction.update(
+                { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore },
+                { where: { id: pendingTransaction.id } },
+              );
+              await pendingTransaction.reload();
+            } catch {
+            }
+            throwApiError(vendorMessage);
+          }
           try {
-            const v = await vendor.withdraw(game_account_id, amounts.vendorTransfer, requestId);
+            const v = await vendor.withdraw(vendorUsername, amounts.vendorTransfer, requestId);
             vendorOk = !!v.success;
+            vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
+            if (v.success) {
+              if (typeof (v as any).beforeCredit === 'number' && Number.isFinite((v as any).beforeCredit)) {
+                vendorCreditBefore = Number((v as any).beforeCredit);
+              }
+              if (typeof (v as any).credit === 'number' && Number.isFinite((v as any).credit)) {
+                vendorCreditAfter = Number((v as any).credit);
+              }
+            }
             if (!vendorOk) {
-              vendorMessage = v.error || v.message;
               needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
             }
           } catch (e: any) {
@@ -1382,7 +1449,27 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             vendorMessage = String(e?.message ?? e ?? '');
             needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? true;
           }
-          if (!vendorOk && needVerify) vendorOk = await verifyIfSupported();
+          if (!vendorOk && needVerify) {
+            vendorOk = await verifyIfSupported();
+            if (vendorOk && !vendorMessage) vendorMessage = 'VERIFIED';
+          }
+          if (vendorOk && !vendorMessage) vendorMessage = 'OK';
+          vendorMessageToPersist = vendorMessage || null;
+          try {
+            if (vendorOk && vendorCreditAfter == null) {
+              const bal2 = await vendor.getBalance(vendorUsername);
+              if (bal2?.success && typeof (bal2 as any)?.credit === 'number' && Number.isFinite((bal2 as any).credit)) {
+                vendorCreditAfter = Number((bal2 as any).credit);
+              }
+              if (vendorMessageToPersist == null) vendorMessageToPersist = bal2?.message || null;
+            }
+            await Transaction.update(
+              { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore, vendor_credit_after: vendorCreditAfter },
+              { where: { id: pendingTransaction.id } },
+            );
+            await pendingTransaction.reload();
+          } catch {
+          }
           if (!vendorOk) throwApiError(vendorMessage);
         }
       }
@@ -1578,6 +1665,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     if (pendingTransaction) {
       try {
         const rawMsg = String(error?.vendorMessage ?? error?.error ?? error?.message ?? error ?? '');
+        const vendorMessage = rawMsg.trim().length > 0 ? rawMsg.slice(0, 500) : null;
         const msgLower = rawMsg.toLowerCase();
         let categoryRemark = 'API ERROR';
         if (msgLower.includes('suspended')) categoryRemark = 'Player account is suspended';
@@ -1616,7 +1704,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         }
 
         await Transaction.update(
-          { status: 'REJECTED', remark: rejectedRemark },
+          { status: 'REJECTED', remark: rejectedRemark, vendor_message: vendorMessage },
           { where: { id: pendingTransaction.id } },
         );
         await pendingTransaction.reload();

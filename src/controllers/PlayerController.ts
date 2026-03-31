@@ -1185,15 +1185,19 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
       return;
     }
 
+    const providerUsername =
+      (result as any)?.raw?.data?.Data?.Username ||
+      (result as any)?.raw?.data?.Username ||
+      finalAccountId;
     const FIXED_PASSWORD = 'Abcd12345';
-    const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+    const pwdResult = await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD);
     const password = pwdResult.success ? FIXED_PASSWORD : undefined;
 
     const nextAccounts = existingAccounts
       .filter((ga) => String(ga?.gameName || '').trim().toLowerCase() !== gameName.toLowerCase())
       .concat({
         gameName,
-        accountId: finalAccountId,
+        accountId: providerUsername,
         password,
         provisioningStatus: 'CREATED',
         attemptedIds,
@@ -1204,13 +1208,13 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     await logAudit(
       req.user?.id ?? null,
       'VENDOR_RETRY_CREATE_SUCCESS',
-      { playerId, gameName, accountId: finalAccountId },
+      { playerId, gameName, accountId: providerUsername },
       { passwordSet: pwdResult.success, attemptedIds, vendorRaw: (result as any)?.raw, vendorPasswordRaw: (pwdResult as any)?.raw },
       getClientIp(req) || null
     );
 
     sendSuccess(res, 'Code1', {
-      gameAccount: { gameName, accountId: finalAccountId, password, provisioningStatus: 'CREATED', attemptedIds },
+      gameAccount: { gameName, accountId: providerUsername, password, provisioningStatus: 'CREATED', attemptedIds },
       idempotent: false,
       passwordSet: pwdResult.success,
       vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined,
@@ -1666,9 +1670,13 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         let passwordSet = false;
         let gamePassword: string | undefined;
         let passwordRaw: any = undefined;
+        const providerUsername =
+          (result as any)?.raw?.data?.Data?.Username ||
+          (result as any)?.raw?.data?.Username ||
+          finalAccountId;
         if (result?.success) {
           const FIXED_PASSWORD = 'Abcd12345';
-          const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+          const pwdResult = await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD);
           passwordSet = pwdResult.success;
           passwordRaw = (pwdResult as any)?.raw;
           if (pwdResult.success) {
@@ -1678,7 +1686,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
 
         vendorResults.push({
           gameName: gameName,
-          accountId: finalAccountId,
+          accountId: providerUsername,
           success: true,
           error: undefined,
           passwordSet,
@@ -1691,7 +1699,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         await logAudit(
           req.user?.id ?? null,
           'VENDOR_CREATE_PLAYER',
-          { gameId: game.id, gameName: gameName, username: finalAccountId },
+          { gameId: game.id, gameName: gameName, username: providerUsername },
           { success: true, status: result?.status, message: result?.message, vendorRaw: (result as any)?.raw, vendorPasswordRaw: passwordRaw },
           getClientIp(req) || null
         );

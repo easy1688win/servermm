@@ -20,6 +20,9 @@ class Transaction extends Model {
   public ip_address!: string | null;
   public bank_balance_after!: number;
   public game_balance_after!: number;
+  public vendor_credit_before!: number | null;
+  public vendor_credit_after!: number | null;
+  public vendor_message!: string | null;
   public tenant_id!: number | null;
   public sub_brand_id!: number | null;
 }
@@ -87,6 +90,18 @@ Transaction.init({
   },
   game_balance_after: {
     type: DataTypes.DECIMAL(15, 2),
+    allowNull: true,
+  },
+  vendor_credit_before: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: true,
+  },
+  vendor_credit_after: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: true,
+  },
+  vendor_message: {
+    type: DataTypes.TEXT,
     allowNull: true,
   },
   tenant_id: {
