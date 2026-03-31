@@ -1146,7 +1146,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
           req.user?.id ?? null,
           'VENDOR_RETRY_CREATE_SKIPPED_CONFLICT',
           { playerId, gameName },
-          { attemptedIds },
+          { attemptedIds, vendorRaw: (result as any)?.raw },
           getClientIp(req) || null
         );
         sendError(res, 'Code809', 409, { attemptedIds });
@@ -1168,7 +1168,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
         req.user?.id ?? null,
         'VENDOR_RETRY_CREATE_FAILED',
         { playerId, gameName },
-        { error: result?.error || 'PV001', attemptedIds },
+        { error: result?.error || 'PV001', attemptedIds, vendorRaw: (result as any)?.raw },
         getClientIp(req) || null
       );
       sendError(res, 'Code809', 400, { detail: result?.error || 'PV001', attemptedIds });
@@ -1195,7 +1195,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
       req.user?.id ?? null,
       'VENDOR_RETRY_CREATE_SUCCESS',
       { playerId, gameName, accountId: finalAccountId },
-      { passwordSet: pwdResult.success, attemptedIds },
+      { passwordSet: pwdResult.success, attemptedIds, vendorRaw: (result as any)?.raw, vendorPasswordRaw: (pwdResult as any)?.raw },
       getClientIp(req) || null
     );
 
@@ -1244,6 +1244,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
 
     const baseAccountId = String((player as any).player_game_id || '').trim();
     const FIXED_PASSWORD = 'Abcd12345';
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
 
     const results: any[] = [];
     const newAccounts: any[] = [];
@@ -1326,7 +1327,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
             provisioningStatus: 'SKIPPED_CONFLICT',
             attemptedIds,
           });
-          results.push({ gameName, use_api: true, action: 'SKIPPED_CONFLICT', attemptedIds });
+          results.push({ gameName, use_api: true, action: 'SKIPPED_CONFLICT', attemptedIds, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
           existingGameNames.add(key);
           return;
         }
@@ -1339,7 +1340,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
           attemptedIds,
           error: result?.error || 'PV001',
         });
-        results.push({ gameName, use_api: true, action: 'PENDING_RETRY', attemptedIds, message: result?.error || 'PV001' });
+        results.push({ gameName, use_api: true, action: 'PENDING_RETRY', attemptedIds, message: result?.error || 'PV001', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
         existingGameNames.add(key);
         return;
       }
@@ -1354,7 +1355,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
         provisioningStatus: 'CREATED',
         attemptedIds,
       });
-      results.push({ gameName, use_api: true, action: 'CREATED', accountId: finalAccountId, attemptedIds, passwordSet: pwdResult.success });
+      results.push({ gameName, use_api: true, action: 'CREATED', accountId: finalAccountId, attemptedIds, passwordSet: pwdResult.success, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined, vendorPasswordRaw: includeVendorRaw ? (pwdResult as any)?.raw : undefined });
       existingGameNames.add(key);
     };
 
@@ -1651,10 +1652,12 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         // 如果创建成功，设置固定密码
         let passwordSet = false;
         let gamePassword: string | undefined;
+        let passwordRaw: any = undefined;
         if (result?.success) {
           const FIXED_PASSWORD = 'Abcd12345';
           const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
           passwordSet = pwdResult.success;
+          passwordRaw = (pwdResult as any)?.raw;
           if (pwdResult.success) {
             gamePassword = FIXED_PASSWORD;
           }
@@ -1676,7 +1679,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
           req.user?.id ?? null,
           'VENDOR_CREATE_PLAYER',
           { gameId: game.id, gameName: gameName, username: finalAccountId },
-          { success: true, status: result?.status, message: result?.message },
+          { success: true, status: result?.status, message: result?.message, vendorRaw: (result as any)?.raw, vendorPasswordRaw: passwordRaw },
           getClientIp(req) || null
         );
 

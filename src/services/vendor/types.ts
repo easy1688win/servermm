@@ -43,6 +43,8 @@ export interface VendorResult {
   error?: string;
   code?: string;
   status?: 'Created' | 'Exists' | 'Failed';
+  raw?: any;
+  vendor?: string;
 }
 
 export interface VendorBalanceResult extends VendorResult {

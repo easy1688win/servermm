@@ -117,6 +117,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
           success: false,
           error: result.error || 'Failed to create player',
           code: 'CREATE_FAILED',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -127,12 +129,15 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
           ? 'Player created successfully' 
           : 'Player already exists',
         code: result.data?.Status === 'Created' ? 'CREATED' : 'EXISTS',
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message || 'Unknown error',
         code: 'ERROR',
+        vendor: 'Joker',
       };
     }
   }
@@ -146,14 +151,17 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to set player status',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
-      return { success: true };
+      return { success: true, vendor: 'Joker', raw: result };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -167,14 +175,17 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to set player password',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
-      return { success: true };
+      return { success: true, vendor: 'Joker', raw: result };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -188,14 +199,17 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to logout player',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
-      return { success: true };
+      return { success: true, vendor: 'Joker', raw: result };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -212,6 +226,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to get balance',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -222,11 +238,14 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         outstandingCredit: result.data?.OutstandingCredit,
         freeCredit: result.data?.FreeCredit,
         outstandingFreeCredit: result.data?.OutstandingFreeCredit,
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -245,6 +264,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to deposit',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -256,11 +277,14 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         beforeCredit: result.data?.BeforeCredit,
         amount: amount,
         time: result.data?.Time,
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -279,6 +303,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to withdraw',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -290,11 +316,14 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         beforeCredit: result.data?.BeforeCredit,
         amount: -amount,
         time: result.data?.Time,
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -309,6 +338,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to withdraw all credit',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -318,11 +349,14 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         requestId: result.data?.RequestID,
         amount: result.data?.Amount,
         time: result.data?.Time,
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -348,17 +382,22 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Failed to launch game',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
       return {
         success: true,
         url: result.data?.Url,
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -376,6 +415,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         return {
           success: false,
           error: result.error || 'Transfer not found',
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
@@ -387,11 +428,14 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
           amount: result.data?.Amount,
           time: result.data?.Time,
         },
+        vendor: 'Joker',
+        raw: result,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }

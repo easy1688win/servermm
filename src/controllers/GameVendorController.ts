@@ -202,11 +202,15 @@ export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<voi
  */
 export const getPlayerBalance = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const result = await vendor.getBalance(String(username));
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -220,6 +224,7 @@ export const getPlayerBalance = async (req: AuthRequest, res: Response): Promise
  */
 export const deposit = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const { amount } = req.body;
 
@@ -232,12 +237,16 @@ export const deposit = async (req: AuthRequest, res: Response): Promise<void> =>
 
     const requestId = generateRequestId();
     const result = await vendor.deposit(String(username), amount, requestId);
+    const vendorRaw = (result as any)?.raw;
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     await logAudit(
       req.user?.id || null,
       `vendor:deposit`,
       { beforeCredit: result.beforeCredit },
-      { amount, credit: result.credit, requestId },
+      { amount, credit: result.credit, requestId, vendorRaw },
       getClientIp(req) || null
     );
 
@@ -253,6 +262,7 @@ export const deposit = async (req: AuthRequest, res: Response): Promise<void> =>
  */
 export const withdraw = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const { amount } = req.body;
 
@@ -265,12 +275,16 @@ export const withdraw = async (req: AuthRequest, res: Response): Promise<void> =
 
     const requestId = generateRequestId();
     const result = await vendor.withdraw(String(username), amount, requestId);
+    const vendorRaw = (result as any)?.raw;
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     await logAudit(
       req.user?.id || null,
       `vendor:withdraw`,
       { beforeCredit: result.beforeCredit },
-      { amount: -amount, credit: result.credit, requestId },
+      { amount: -amount, credit: result.credit, requestId, vendorRaw },
       getClientIp(req) || null
     );
 
@@ -286,18 +300,23 @@ export const withdraw = async (req: AuthRequest, res: Response): Promise<void> =
  */
 export const withdrawAll = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
     const requestId = generateRequestId();
     const result = await vendor.withdrawAll(String(username), requestId);
+    const vendorRaw = (result as any)?.raw;
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     await logAudit(
       req.user?.id || null,
       `vendor:withdraw_all`,
       null,
-      { amount: result.amount, requestId },
+      { amount: result.amount, requestId, vendorRaw },
       getClientIp(req) || null
     );
 
@@ -313,6 +332,7 @@ export const withdrawAll = async (req: AuthRequest, res: Response): Promise<void
  */
 export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, requestId } = req.params;
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
@@ -323,6 +343,9 @@ export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     const result = await vendorAny.verifyTransfer(String(requestId));
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -361,6 +384,7 @@ export const getGameList = async (req: AuthRequest, res: Response): Promise<void
  */
 export const launchGame = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const { username, gameCode, mode, amount, language, template } = req.body;
 
@@ -377,6 +401,9 @@ export const launchGame = async (req: AuthRequest, res: Response): Promise<void>
       language: language || 'zh',
       template,
     });
+    if (!includeVendorRaw && result && typeof result === 'object') {
+      delete (result as any).raw;
+    }
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {

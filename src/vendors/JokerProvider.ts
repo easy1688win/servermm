@@ -14,6 +14,9 @@ export interface JokerResponse {
   success: boolean;
   data?: any;
   error?: string;
+  httpStatus?: number;
+  durationMs?: number;
+  rawText?: string;
 }
 
 export interface CreatePlayerResponse {
@@ -169,36 +172,59 @@ export class JokerProvider {
         body: JSON.stringify(requestBody),
       });
 
+      const durationMs = Date.now() - startedAt;
+      const httpStatus = response.status;
+      const rawText = await response.text();
+      let parsed: any = null;
+      try {
+        parsed = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        parsed = null;
+      }
+
       if (!response.ok) {
-        // Handle specific error cases
         if (response.status === 400) {
-          const errorData = await response.json().catch(() => null);
           return {
             success: false,
-            error: errorData?.Message || `Invalid request: ${response.status}`,
+            error: parsed?.Message || `Invalid request: ${response.status}`,
+            data: parsed,
+            httpStatus,
+            durationMs,
+            rawText: rawText ? rawText.slice(0, 8000) : undefined,
           };
         }
         if (response.status === 404) {
           return {
             success: false,
             error: 'Request not found',
+            data: parsed,
+            httpStatus,
+            durationMs,
+            rawText: rawText ? rawText.slice(0, 8000) : undefined,
           };
         }
         return {
           success: false,
           error: `HTTP error: ${response.status}`,
+          data: parsed,
+          httpStatus,
+          durationMs,
+          rawText: rawText ? rawText.slice(0, 8000) : undefined,
         };
       }
 
-      const data = await response.json().catch(() => null);
       return {
         success: true,
-        data,
+        data: parsed,
+        httpStatus,
+        durationMs,
+        rawText: rawText ? rawText.slice(0, 8000) : undefined,
       };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Network error',
+        durationMs: Date.now() - startedAt,
       };
     }
   }
