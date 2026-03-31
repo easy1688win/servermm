@@ -821,6 +821,28 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         gameIconMap[g.name] = g.icon || null;
       }
 
+      const gameAppIdByNameLower = new Map<string, string>();
+      for (const g of games as any[]) {
+        const name = typeof g?.name === 'string' ? g.name.trim() : '';
+        if (!name) continue;
+        let cfg: any = (g as any).vendor_config;
+        if (typeof cfg === 'string') {
+          const s = cfg.trim();
+          if (s.startsWith('{') || s.startsWith('[')) {
+            try {
+              cfg = JSON.parse(s);
+            } catch {
+              cfg = null;
+            }
+          } else {
+            cfg = null;
+          }
+        }
+        const appId = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? String((cfg as any).appId || '').trim() : '';
+        if (!appId) continue;
+        gameAppIdByNameLower.set(name.toLowerCase(), appId);
+      }
+
       const bankIconMap: Record<string, string | null> = {};
       for (const bc of bankCatalog as any[]) {
         if (!bc || !bc.name) continue;
@@ -828,6 +850,13 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       }
 
       const payloadTransactions = (shapedTransactions as any[]).map((t) => ({
+        display_game_account_id: (() => {
+          const gameName = String((t as any).game_name ?? '').trim().toLowerCase();
+          const appId = gameName ? (gameAppIdByNameLower.get(gameName) ?? '') : '';
+          const accountId = String((t as any).game_account_id ?? '').trim();
+          if (!appId || !accountId) return null;
+          return accountId.includes('.') ? accountId : `${appId}.${accountId}`;
+        })(),
         id: t.id,
         createdAt: t.createdAt ?? t.created_at ?? null,
         type: t.type,
