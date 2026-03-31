@@ -1458,17 +1458,21 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
         return;
       }
 
-      const pwdResult = await vendor.setPlayerPassword(finalAccountId, FIXED_PASSWORD);
+      const providerUsername =
+        (result as any)?.raw?.data?.Data?.Username ||
+        (result as any)?.raw?.data?.Username ||
+        finalAccountId;
+      const pwdResult = await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD);
       const password = pwdResult.success ? FIXED_PASSWORD : undefined;
 
       newAccounts.push({
         gameName,
-        accountId: finalAccountId,
+        accountId: providerUsername,
         password,
         provisioningStatus: 'CREATED',
         attemptedIds,
       });
-      results.push({ gameName, use_api: true, action: 'CREATED', accountId: finalAccountId, attemptedIds, passwordSet: pwdResult.success, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined, vendorPasswordRaw: includeVendorRaw ? (pwdResult as any)?.raw : undefined });
+      results.push({ gameName, use_api: true, action: 'CREATED', accountId: providerUsername, attemptedIds, passwordSet: pwdResult.success, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined, vendorPasswordRaw: includeVendorRaw ? (pwdResult as any)?.raw : undefined });
       existingGameNames.add(key);
     };
 

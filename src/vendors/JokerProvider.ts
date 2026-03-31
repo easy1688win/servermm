@@ -232,6 +232,28 @@ export class JokerProvider {
         };
       }
 
+      if (parsed && typeof parsed === 'object' && typeof parsed.Status === 'string') {
+        const status = parsed.Status.trim();
+        if (status !== 'OK' && status !== 'Created') {
+          const err =
+            (typeof (parsed as any).Error === 'string' && (parsed as any).Error.trim().length > 0
+              ? (parsed as any).Error.trim()
+              : typeof (parsed as any).error === 'string' && (parsed as any).error.trim().length > 0
+                ? (parsed as any).error.trim()
+                : message && message.trim().length > 0
+                  ? message.trim()
+                  : `Status: ${status}`);
+          return {
+            success: false,
+            error: err,
+            data: parsed,
+            httpStatus,
+            durationMs,
+            message: message || undefined,
+          };
+        }
+      }
+
       return {
         success: true,
         data: parsed,
