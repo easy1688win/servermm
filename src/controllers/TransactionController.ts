@@ -1560,13 +1560,13 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       const now = new Date();
       const statsDate = now.toISOString().slice(0, 10);
       let stats = await PlayerStats.findOne({
-        where: { player_id, date: statsDate },
+        where: withTenancyWhere(tenancy, { player_id, date: statsDate } as any),
         transaction: tFinal,
         lock: tFinal.LOCK.UPDATE,
       } as any);
       if (!stats) {
         stats = await PlayerStats.create(
-          { player_id, date: statsDate },
+          withTenancyCreate(tenancy, { player_id, date: statsDate }),
           { transaction: tFinal },
         );
       }
@@ -1938,17 +1938,14 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
           const isWalve = transaction.type === 'WALVE';
 
           let stats = await PlayerStats.findOne({
-            where: { player_id: transaction.player_id, date: statsDateOnly },
+            where: withTenancyWhere(tenancy, { player_id: transaction.player_id, date: statsDateOnly } as any),
             transaction: t,
             lock: t.LOCK.UPDATE,
           } as any);
 
           if (!stats) {
             stats = await PlayerStats.create(
-              {
-                player_id: transaction.player_id,
-                date: statsDateOnly,
-              },
+              withTenancyCreate(tenancy, { player_id: transaction.player_id, date: statsDateOnly }),
               { transaction: t },
             );
           }

@@ -402,7 +402,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     const [bankCatalog, games, referralSetting, tagSetting, allOperators] = await Promise.all([
       BankCatalog.findAll(),
       Game.findAll({
-        attributes: ['id', 'name', 'icon', 'status'],
+        attributes: ['id', 'name', 'icon', 'status', 'vendor_config'],
         where: withTenancyWhere(scope, { status: 'active' }),
       }),
       getSettingValue(scope, 'referralSources'),
@@ -571,7 +571,13 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
           [sequelize.fn('SUM', sequelize.col('total_tips')), 'total_tips'],
           [sequelize.fn('SUM', sequelize.col('total_bonus')), 'total_bonus'],
         ],
-        where: withTenancyWhere(scope, { player_id: { [Op.in]: pagedPlayerIds } }),
+        where: {
+          player_id: { [Op.in]: pagedPlayerIds },
+          [Op.or]: [
+            { tenant_id: scope.tenant_id, sub_brand_id: scope.sub_brand_id },
+            { tenant_id: null, sub_brand_id: null },
+          ],
+        } as any,
         group: ['player_id'],
         raw: true,
       } as any);
@@ -628,6 +634,28 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    const gameAppIdByNameLower = new Map<string, string>();
+    for (const g of games as any[]) {
+      const name = typeof g?.name === 'string' ? g.name.trim() : '';
+      if (!name) continue;
+      let cfg: any = (g as any).vendor_config;
+      if (typeof cfg === 'string') {
+        const s = cfg.trim();
+        if (s.startsWith('{') || s.startsWith('[')) {
+          try {
+            cfg = JSON.parse(s);
+          } catch {
+            cfg = null;
+          }
+        } else {
+          cfg = null;
+        }
+      }
+      const appId = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? String((cfg as any).appId || '').trim() : '';
+      if (!appId) continue;
+      gameAppIdByNameLower.set(name.toLowerCase(), appId);
+    }
+
     const playersPayload = (pagedPlayersRaw as any[]).map((p: any) => {
       const sanitized = sanitizePlayerForResponse(p, userPermissions);
       const json = sanitized?.toJSON ? sanitized.toJSON() : { ...sanitized };
@@ -666,7 +694,18 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
           return { ...ga, walletCredit: val };
         });
 
-        (metadata as any).gameAccounts = nextGameAccounts;
+        const nextGameAccountsWithDisplay = nextGameAccounts.map((ga: any) => {
+          if (!ga || typeof ga !== 'object') return ga;
+          const name = typeof ga.gameName === 'string' ? ga.gameName.trim().toLowerCase() : '';
+          const appId = name ? (gameAppIdByNameLower.get(name) ?? '') : '';
+          const accountId = typeof ga.accountId === 'string' ? ga.accountId.trim() : '';
+          if (!appId || !accountId) return ga;
+          const hasDot = accountId.includes('.');
+          const displayAccountId = hasDot ? accountId : `${appId}.${accountId}`;
+          return { ...ga, displayAccountId };
+        });
+
+        (metadata as any).gameAccounts = nextGameAccountsWithDisplay;
       }
 
       const stats = statsMap.get(json.id) || {
