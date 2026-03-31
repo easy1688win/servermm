@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { Player, Game, BankCatalog, Role, Setting, SubBrand, User, PlayerStats, Product } from '../models';
+import { Player, Game, BankCatalog, Role, Setting, SubBrand, User, PlayerStats, Product, Transaction } from '../models';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
 import { VendorFactory } from '../services/vendor/VendorFactory';
@@ -526,6 +526,37 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       .map((p) => Number(p?.id ?? null))
       .filter((id) => Number.isFinite(id) && id > 0);
 
+    const latestVendorCreditAfter = new Map<string, number>();
+    if (pagedPlayerIds.length > 0) {
+      try {
+        const rows = await Transaction.findAll({
+          attributes: ['player_id', 'game_id', 'vendor_credit_after', 'createdAt'],
+          where: withTenancyWhere(scope, {
+            player_id: { [Op.in]: pagedPlayerIds },
+            status: 'COMPLETED',
+            vendor_credit_after: { [Op.ne]: null },
+            game_id: { [Op.ne]: null },
+          } as any),
+          order: [['createdAt', 'DESC']],
+          limit: 5000,
+        } as any);
+
+        for (const r of rows as any[]) {
+          const pid = Number(r?.player_id ?? null);
+          const gid = Number(r?.game_id ?? null);
+          if (!Number.isFinite(pid) || pid <= 0) continue;
+          if (!Number.isFinite(gid) || gid <= 0) continue;
+          const key = `${pid}:${gid}`;
+          if (latestVendorCreditAfter.has(key)) continue;
+          const raw = (r as any).vendor_credit_after;
+          const n = typeof raw === 'number' ? raw : (raw != null ? Number(raw) : NaN);
+          if (!Number.isFinite(n)) continue;
+          latestVendorCreditAfter.set(key, n);
+        }
+      } catch {
+      }
+    }
+
     if (pagedPlayerIds.length > 0) {
       const statsAgg = await PlayerStats.findAll({
         attributes: [
@@ -611,6 +642,32 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         }
       }
       const metadata = { ...metadataRaw, createdByFullName };
+      const gameAccountsRaw = Array.isArray((metadata as any).gameAccounts) ? (metadata as any).gameAccounts : [];
+      if (gameAccountsRaw.length > 0) {
+        const gameIdByName = new Map<string, number>();
+        for (const g of games as any[]) {
+          const name = typeof g?.name === 'string' ? g.name.trim() : '';
+          const id = Number(g?.id ?? null);
+          if (!name) continue;
+          if (!Number.isFinite(id) || id <= 0) continue;
+          gameIdByName.set(name.toLowerCase(), id);
+        }
+
+        const nextGameAccounts = gameAccountsRaw.map((ga: any) => {
+          if (!ga || typeof ga !== 'object') return ga;
+          const walletCredit = ga.walletCredit;
+          if (walletCredit != null && Number.isFinite(Number(walletCredit))) return ga;
+          const name = typeof ga.gameName === 'string' ? ga.gameName.trim().toLowerCase() : '';
+          const gid = name ? (gameIdByName.get(name) ?? null) : null;
+          if (!gid) return ga;
+          const key = `${json.id}:${gid}`;
+          const val = latestVendorCreditAfter.get(key);
+          if (val == null) return ga;
+          return { ...ga, walletCredit: val };
+        });
+
+        (metadata as any).gameAccounts = nextGameAccounts;
+      }
 
       const stats = statsMap.get(json.id) || {
         lastDepositDate: null,

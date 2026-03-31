@@ -11,6 +11,15 @@ import { BaseVendorService } from '../BaseVendorService';
 import Game from '../../../models/Game';
 import { decrypt, isEncrypted } from '../../../utils/encryption';
 
+const toNumber = (v: any): number | undefined => {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+};
+
 // ============================================
 // Joker 供应商服务适配器
 // 继承 BaseVendorService 复用公共功能
@@ -247,10 +256,10 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       return {
         success: true,
         username: result.data?.Username,
-        credit: result.data?.Credit,
-        outstandingCredit: result.data?.OutstandingCredit,
-        freeCredit: result.data?.FreeCredit,
-        outstandingFreeCredit: result.data?.OutstandingFreeCredit,
+        credit: toNumber(result.data?.Credit),
+        outstandingCredit: toNumber(result.data?.OutstandingCredit),
+        freeCredit: toNumber(result.data?.FreeCredit),
+        outstandingFreeCredit: toNumber(result.data?.OutstandingFreeCredit),
         vendor: 'Joker',
         raw: result,
       };
@@ -286,8 +295,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         success: true,
         username: result.data?.Username,
         requestId: result.data?.RequestID,
-        credit: result.data?.Credit,
-        beforeCredit: result.data?.BeforeCredit,
+        credit: toNumber(result.data?.Credit),
+        beforeCredit: toNumber(result.data?.BeforeCredit),
         amount: amount,
         time: result.data?.Time,
         vendor: 'Joker',
@@ -325,8 +334,8 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
         success: true,
         username: result.data?.Username,
         requestId: result.data?.RequestID,
-        credit: result.data?.Credit,
-        beforeCredit: result.data?.BeforeCredit,
+        credit: toNumber(result.data?.Credit),
+        beforeCredit: toNumber(result.data?.BeforeCredit),
         amount: -amount,
         time: result.data?.Time,
         vendor: 'Joker',

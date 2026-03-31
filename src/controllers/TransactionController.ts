@@ -12,6 +12,25 @@ import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
 import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
 
+let transactionSynced = false;
+const ensureTransactionsSynced = async () => {
+  if (transactionSynced) return;
+  try {
+    await Transaction.sync({ alter: true });
+  } catch {
+  }
+  transactionSynced = true;
+};
+
+const toFiniteNumber = (v: any): number | null => {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+};
+
 const normalizeIp = (ip: string | null | undefined): string | null => {
 	if (!ip) return null;
 	if (ip === '::1') return '127.0.0.1';
@@ -148,6 +167,8 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
     json.game_name = gameName;
     json.game_account_id = gameAccountId;
     json.message = json.vendor_message ?? null;
+    json.credit_before = json.vendor_credit_before ?? null;
+    json.credit_after = json.vendor_credit_after ?? null;
     
     // 确保walve字段被包含
     json.walve = json.walve ?? 0;
@@ -158,6 +179,7 @@ const shapeTransactionsForResponse = (transactions: any[], userPermissions: stri
 
 export const getTransactions = async (req: AuthRequest, res: Response) => {
   try {
+    await ensureTransactionsSynced();
     const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
     const scope = (req.query.scope as string | undefined) || null;
@@ -194,6 +216,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
 
 export const getPlayerTransactionHistory = async (req: AuthRequest, res: Response) => {
   try {
+    await ensureTransactionsSynced();
     const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
 
@@ -812,6 +835,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         bonus: t.bonus ?? null,
         walve: t.walve ?? null,
         tips: t.tips ?? null,
+        credit_before: (t as any).credit_before ?? (t as any).vendor_credit_before ?? null,
+        credit_after: (t as any).credit_after ?? (t as any).vendor_credit_after ?? null,
         bank_account_id: t.bank_account_id ?? null,
         player_id: t.player_id ?? null,
         player_game_id:
@@ -1057,6 +1082,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
             bonus: t.bonus ?? null,
             walve: t.walve ?? null,
             tips: t.tips ?? null,
+            credit_before: (t as any).credit_before ?? (t as any).vendor_credit_before ?? null,
+            credit_after: (t as any).credit_after ?? (t as any).vendor_credit_after ?? null,
             bank_account_id: t.bank_account_id ?? null,
             player_id: t.player_id ?? null,
             game_name: t.game_name ?? null,
@@ -1181,6 +1208,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
   let ctxGameId: number | null = null;
   let ctxGameAccountId: string | null = null;
   try {
+    await ensureTransactionsSynced();
     const clientIp = getClientIp(req);
     const tenancy = getTenancyScopeOrThrow(req);
     const { player_id, bank_account_id, type, amount, game_id, game_account_id } = req.body;
@@ -1313,6 +1341,9 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     }
 
     const requestId = String(pendingTransaction.id);
+    let vendorUsername: string | null = null;
+    let vendorCreditBefore: number | null = null;
+    let vendorCreditAfter: number | null = null;
 
     if (gameUseApi) {
       const gameForVendor = effectiveGameId
@@ -1323,9 +1354,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         if (!game_account_id || typeof game_account_id !== 'string') {
           throw new Error('Game account is required for vendor transfer');
         }
-        const vendorUsername = game_account_id;
-        let vendorCreditBefore: number | null = null;
-        let vendorCreditAfter: number | null = null;
+        vendorUsername = game_account_id;
         let vendorOk = false;
         const throwApiError = (vendorMessage?: string) => {
           const e: any = new Error('API ERROR');
@@ -1354,18 +1383,6 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           }
           return false;
         };
-        try {
-          const bal = await vendor.getBalance(vendorUsername);
-          if (bal?.success && typeof (bal as any)?.credit === 'number' && Number.isFinite((bal as any).credit)) {
-            vendorCreditBefore = Number((bal as any).credit);
-          }
-          await Transaction.update(
-            { vendor_credit_before: vendorCreditBefore, vendor_message: bal?.message || bal?.error || null },
-            { where: { id: pendingTransaction.id } },
-          );
-          await pendingTransaction.reload();
-        } catch {
-        }
 
         let vendorMessageToPersist: string | null = null;
         if (type === 'DEPOSIT') {
@@ -1376,12 +1393,10 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             vendorOk = !!v.success;
             vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
             if (v.success) {
-              if (typeof (v as any).beforeCredit === 'number' && Number.isFinite((v as any).beforeCredit)) {
-                vendorCreditBefore = Number((v as any).beforeCredit);
-              }
-              if (typeof (v as any).credit === 'number' && Number.isFinite((v as any).credit)) {
-                vendorCreditAfter = Number((v as any).credit);
-              }
+              const before = toFiniteNumber((v as any).beforeCredit);
+              const after = toFiniteNumber((v as any).credit);
+              if (before != null) vendorCreditBefore = before;
+              if (after != null) vendorCreditAfter = after;
             }
             if (!vendorOk) {
               needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
@@ -1398,13 +1413,6 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           if (vendorOk && !vendorMessage) vendorMessage = 'OK';
           vendorMessageToPersist = vendorMessage || null;
           try {
-            if (vendorOk && vendorCreditAfter == null) {
-              const bal2 = await vendor.getBalance(vendorUsername);
-              if (bal2?.success && typeof (bal2 as any)?.credit === 'number' && Number.isFinite((bal2 as any).credit)) {
-                vendorCreditAfter = Number((bal2 as any).credit);
-              }
-              if (vendorMessageToPersist == null) vendorMessageToPersist = bal2?.message || null;
-            }
             await Transaction.update(
               { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore, vendor_credit_after: vendorCreditAfter },
               { where: { id: pendingTransaction.id } },
@@ -1416,30 +1424,15 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         } else if (type === 'WITHDRAWAL' || type === 'WALVE') {
           let vendorMessage: string | undefined;
           let needVerify = false;
-          if (vendorCreditBefore != null && Number.isFinite(vendorCreditBefore) && vendorCreditBefore < Number(amounts.vendorTransfer)) {
-            vendorMessage = 'Insufficient Credit';
-            vendorMessageToPersist = vendorMessage;
-            try {
-              await Transaction.update(
-                { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore },
-                { where: { id: pendingTransaction.id } },
-              );
-              await pendingTransaction.reload();
-            } catch {
-            }
-            throwApiError(vendorMessage);
-          }
           try {
             const v = await vendor.withdraw(vendorUsername, amounts.vendorTransfer, requestId);
             vendorOk = !!v.success;
             vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
             if (v.success) {
-              if (typeof (v as any).beforeCredit === 'number' && Number.isFinite((v as any).beforeCredit)) {
-                vendorCreditBefore = Number((v as any).beforeCredit);
-              }
-              if (typeof (v as any).credit === 'number' && Number.isFinite((v as any).credit)) {
-                vendorCreditAfter = Number((v as any).credit);
-              }
+              const before = toFiniteNumber((v as any).beforeCredit);
+              const after = toFiniteNumber((v as any).credit);
+              if (before != null) vendorCreditBefore = before;
+              if (after != null) vendorCreditAfter = after;
             }
             if (!vendorOk) {
               needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
@@ -1456,13 +1449,6 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           if (vendorOk && !vendorMessage) vendorMessage = 'OK';
           vendorMessageToPersist = vendorMessage || null;
           try {
-            if (vendorOk && vendorCreditAfter == null) {
-              const bal2 = await vendor.getBalance(vendorUsername);
-              if (bal2?.success && typeof (bal2 as any)?.credit === 'number' && Number.isFinite((bal2 as any).credit)) {
-                vendorCreditAfter = Number((bal2 as any).credit);
-              }
-              if (vendorMessageToPersist == null) vendorMessageToPersist = bal2?.message || null;
-            }
             await Transaction.update(
               { vendor_message: vendorMessageToPersist, vendor_credit_before: vendorCreditBefore, vendor_credit_after: vendorCreditAfter },
               { where: { id: pendingTransaction.id } },
@@ -1502,6 +1488,39 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         : null;
       if (!gameLocked) {
         throw new Error('Game not found');
+      }
+
+      if (vendorUsername && vendorCreditAfter != null && Number.isFinite(vendorCreditAfter)) {
+        try {
+          const meta: any = (player as any).metadata && typeof (player as any).metadata === 'object' ? (player as any).metadata : {};
+          const accounts: any[] = Array.isArray(meta.gameAccounts) ? meta.gameAccounts : [];
+          const gameName = String((gameLocked as any).name || '').trim();
+          const normalizedGameName = gameName.toLowerCase();
+          const normalizedVendorUsername = vendorUsername.trim().toLowerCase();
+
+          const hasExactMatch = accounts.some((ga: any) => {
+            const gaGameName = String(ga?.gameName || '').trim().toLowerCase();
+            const gaAccountId = String(ga?.accountId || '').trim().toLowerCase();
+            return gaGameName === normalizedGameName && gaAccountId === normalizedVendorUsername;
+          });
+
+          const nextAccounts = accounts.map((ga: any) => {
+            const gaGameNameRaw = String(ga?.gameName || '').trim();
+            if (!gaGameNameRaw) return ga;
+            const gaGameName = gaGameNameRaw.toLowerCase();
+            if (gaGameName !== normalizedGameName) return ga;
+
+            if (hasExactMatch) {
+              const gaAccountId = String(ga?.accountId || '').trim().toLowerCase();
+              if (gaAccountId !== normalizedVendorUsername) return ga;
+            }
+
+            return { ...ga, walletCredit: vendorCreditAfter };
+          });
+          (player as any).metadata = { ...meta, gameAccounts: nextAccounts };
+          await (player as any).save({ transaction: tFinal });
+        } catch {
+        }
       }
 
       if (reserveBank > 0 && bankAccount) {
