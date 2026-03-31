@@ -14,7 +14,10 @@
     "test": "jest --passWithNoTests",
     "players:generate": "ts-node scripts/generate-players.ts",
     "db:backup": "bash scripts/backup-database.sh",
-    "db:backup:windows": "scripts\\backup-database.bat"
+    "db:backup:windows": "scripts\\backup-database.bat",
+    "test:joker-api": "node scripts/test-joker-api.js",
+    "test:joker-api:linux": "bash scripts/test-joker-api-simple.sh",
+    "test:joker-api:windows": "scripts\\test-joker-api.bat"
   },
   "keywords": [],
   "author": "",

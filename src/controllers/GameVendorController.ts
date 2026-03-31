@@ -53,6 +53,16 @@ const getVendor = async (req: AuthRequest, gameId: number, res: Response) => {
   return vendor;
 };
 
+const normalizeVendorPayload = (payload: any, includeVendorRaw: boolean) => {
+  if (!payload || typeof payload !== 'object') return payload;
+  (payload as any).message =
+    (payload as any).success ? ((payload as any).message || 'OK') : ((payload as any).error || (payload as any).message || 'Failed');
+  if (!includeVendorRaw) {
+    delete (payload as any).raw;
+  }
+  return payload;
+};
+
 // ==================== Player Management ====================
 
 /**
@@ -63,6 +73,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
   try {
     const { gameId } = req.params;
     const { username } = req.body;
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
 
     if (!username || typeof username !== 'string') {
       sendError(res, 'Code9004', 400);
@@ -73,6 +84,11 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
     if (!vendor) return;
 
     const result = await vendor.createPlayer(username);
+    const vendorRaw = (result as any)?.raw;
+    if (!result.success) {
+      sendError(res, 'Code9000', 400, { detail: result.error || result.message || 'Failed to create player', vendorRaw: includeVendorRaw ? vendorRaw : undefined });
+      return;
+    }
 
     // Log audit
     await logAudit(
@@ -83,7 +99,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
       getClientIp(req) || null
     );
 
-    sendSuccess(res, 'Code1', { success: true, message: result.message, status: result.status });
+    sendSuccess(res, 'Code1', { success: true, message: result.message || 'OK', status: result.status, vendorRaw: includeVendorRaw ? vendorRaw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to create player' });
   }
@@ -95,6 +111,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
  */
 export const setPlayerStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const { status } = req.body;
 
@@ -108,7 +125,7 @@ export const setPlayerStatus = async (req: AuthRequest, res: Response): Promise<
 
     const result = await vendor.setPlayerStatus(String(username), status as 'Active' | 'Suspend');
     if (!result.success) {
-      sendError(res, 'Code9000', 400, { detail: result.error || 'Failed to set player status' });
+      sendError(res, 'Code9000', 400, { detail: result.error || result.message || 'Failed to set player status', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
       return;
     }
 
@@ -120,7 +137,7 @@ export const setPlayerStatus = async (req: AuthRequest, res: Response): Promise<
       getClientIp(req) || null
     );
 
-    sendSuccess(res, 'Code1', { success: true });
+    sendSuccess(res, 'Code1', { success: true, message: result.message || 'OK', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to set player status' });
   }
@@ -132,6 +149,7 @@ export const setPlayerStatus = async (req: AuthRequest, res: Response): Promise<
  */
 export const setPlayerPassword = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
     const { password } = req.body;
 
@@ -145,7 +163,7 @@ export const setPlayerPassword = async (req: AuthRequest, res: Response): Promis
 
     const result = await vendor.setPlayerPassword(String(username), password);
     if (!result.success) {
-      sendError(res, 'Code9000', 400, { detail: result.error || 'Failed to set player password' });
+      sendError(res, 'Code9000', 400, { detail: result.error || result.message || 'Failed to set player password', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
       return;
     }
 
@@ -157,7 +175,7 @@ export const setPlayerPassword = async (req: AuthRequest, res: Response): Promis
       getClientIp(req) || null
     );
 
-    sendSuccess(res, 'Code1', { success: true });
+    sendSuccess(res, 'Code1', { success: true, message: result.message || 'OK', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to set player password' });
   }
@@ -169,6 +187,7 @@ export const setPlayerPassword = async (req: AuthRequest, res: Response): Promis
  */
 export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId, username } = req.params;
 
     const vendor = await getVendor(req, Number(gameId), res);
@@ -176,7 +195,7 @@ export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<voi
 
     const result = await vendor.logoutPlayer(String(username));
     if (!result.success) {
-      sendError(res, 'Code9000', 400, { detail: result.error || 'Failed to logout player' });
+      sendError(res, 'Code9000', 400, { detail: result.error || result.message || 'Failed to logout player', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
       return;
     }
 
@@ -188,7 +207,7 @@ export const logoutPlayer = async (req: AuthRequest, res: Response): Promise<voi
       getClientIp(req) || null
     );
 
-    sendSuccess(res, 'Code1', { success: true });
+    sendSuccess(res, 'Code1', { success: true, message: result.message || 'OK', vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to logout player' });
   }
@@ -207,10 +226,7 @@ export const getPlayerBalance = async (req: AuthRequest, res: Response): Promise
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
 
-    const result = await vendor.getBalance(String(username));
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
-    }
+    const result = normalizeVendorPayload(await vendor.getBalance(String(username)), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -236,10 +252,12 @@ export const deposit = async (req: AuthRequest, res: Response): Promise<void> =>
     if (!vendor) return;
 
     const requestId = generateRequestId();
-    const result = await vendor.deposit(String(username), amount, requestId);
+    const result = normalizeVendorPayload(await vendor.deposit(String(username), amount, requestId), includeVendorRaw) as any;
     const vendorRaw = (result as any)?.raw;
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
+
+    if (!(result as any)?.success) {
+      sendSuccess(res, 'Code1', result);
+      return;
     }
 
     await logAudit(
@@ -274,10 +292,12 @@ export const withdraw = async (req: AuthRequest, res: Response): Promise<void> =
     if (!vendor) return;
 
     const requestId = generateRequestId();
-    const result = await vendor.withdraw(String(username), amount, requestId);
+    const result = normalizeVendorPayload(await vendor.withdraw(String(username), amount, requestId), includeVendorRaw) as any;
     const vendorRaw = (result as any)?.raw;
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
+
+    if (!(result as any)?.success) {
+      sendSuccess(res, 'Code1', result);
+      return;
     }
 
     await logAudit(
@@ -306,10 +326,12 @@ export const withdrawAll = async (req: AuthRequest, res: Response): Promise<void
     if (!vendor) return;
 
     const requestId = generateRequestId();
-    const result = await vendor.withdrawAll(String(username), requestId);
+    const result = normalizeVendorPayload(await vendor.withdrawAll(String(username), requestId), includeVendorRaw) as any;
     const vendorRaw = (result as any)?.raw;
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
+
+    if (!(result as any)?.success) {
+      sendSuccess(res, 'Code1', result);
+      return;
     }
 
     await logAudit(
@@ -342,10 +364,7 @@ export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<v
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.verifyTransfer(String(requestId));
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
-    }
+    const result = normalizeVendorPayload(await vendorAny.verifyTransfer(String(requestId)), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -361,6 +380,7 @@ export const verifyTransfer = async (req: AuthRequest, res: Response): Promise<v
  */
 export const getGameList = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
@@ -370,9 +390,11 @@ export const getGameList = async (req: AuthRequest, res: Response): Promise<void
       sendError(res, 'Code9003', 400);
       return;
     }
-    const games = await vendorAny.getGameList();
+    const out = await vendorAny.getGameList();
+    const normalized = normalizeVendorPayload(out, includeVendorRaw) as any;
+    const games = Array.isArray(out) ? out : normalized?.games;
 
-    sendSuccess(res, 'Code1', { games });
+    sendSuccess(res, 'Code1', { games: Array.isArray(games) ? games : [], message: normalized?.message || 'OK', vendorRaw: includeVendorRaw ? normalized?.raw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to get game list' });
   }
@@ -401,9 +423,7 @@ export const launchGame = async (req: AuthRequest, res: Response): Promise<void>
       language: language || 'zh',
       template,
     });
-    if (!includeVendorRaw && result && typeof result === 'object') {
-      delete (result as any).raw;
-    }
+    normalizeVendorPayload(result, includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -419,6 +439,7 @@ export const launchGame = async (req: AuthRequest, res: Response): Promise<void>
  */
 export const getTransactionsByHour = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const { startDate, endDate, nextId } = req.query;
 
@@ -434,7 +455,7 @@ export const getTransactionsByHour = async (req: AuthRequest, res: Response): Pr
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.getTransactionsByHour(String(startDate), String(endDate), { nextId: nextId ? String(nextId) : undefined });
+    const result = normalizeVendorPayload(await vendorAny.getTransactionsByHour(String(startDate), String(endDate), { nextId: nextId ? String(nextId) : undefined }), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -444,6 +465,7 @@ export const getTransactionsByHour = async (req: AuthRequest, res: Response): Pr
 
 export const getTransactionsByMinute = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const { startDate, endDate, nextId } = req.query;
 
@@ -459,7 +481,7 @@ export const getTransactionsByMinute = async (req: AuthRequest, res: Response): 
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.getTransactionsByMinute(String(startDate), String(endDate), { nextId: nextId ? String(nextId) : undefined });
+    const result = normalizeVendorPayload(await vendorAny.getTransactionsByMinute(String(startDate), String(endDate), { nextId: nextId ? String(nextId) : undefined }), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -473,6 +495,7 @@ export const getTransactionsByMinute = async (req: AuthRequest, res: Response): 
  */
 export const getWinloss = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const { startDate, endDate, username } = req.query;
 
@@ -488,9 +511,10 @@ export const getWinloss = async (req: AuthRequest, res: Response): Promise<void>
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.getWinloss(String(startDate), String(endDate), username ? String(username) : undefined);
+    const result = normalizeVendorPayload(await vendorAny.getWinloss(String(startDate), String(endDate), username ? String(username) : undefined), includeVendorRaw) as any;
 
-    sendSuccess(res, 'Code1', { winloss: result });
+    const winloss = Array.isArray(result) ? result : result?.winloss;
+    sendSuccess(res, 'Code1', { winloss: Array.isArray(winloss) ? winloss : [], message: result?.message || 'OK', vendorRaw: includeVendorRaw ? result?.raw : undefined });
   } catch (error: any) {
     sendError(res, 'Code9000', 500, { detail: error.message || 'Failed to get winloss data' });
   }
@@ -502,6 +526,7 @@ export const getWinloss = async (req: AuthRequest, res: Response): Promise<void>
  */
 export const getHistoryUrl = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const { ocode, language } = req.query;
 
@@ -517,7 +542,7 @@ export const getHistoryUrl = async (req: AuthRequest, res: Response): Promise<vo
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.getHistoryUrl(String(ocode), language ? String(language) : undefined);
+    const result = normalizeVendorPayload(await vendorAny.getHistoryUrl(String(ocode), language ? String(language) : undefined), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {
@@ -533,6 +558,7 @@ export const getHistoryUrl = async (req: AuthRequest, res: Response): Promise<vo
  */
 export const getJackpot = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const { gameId } = req.params;
     const vendor = await getVendor(req, Number(gameId), res);
     if (!vendor) return;
@@ -542,7 +568,7 @@ export const getJackpot = async (req: AuthRequest, res: Response): Promise<void>
       sendError(res, 'Code9003', 400);
       return;
     }
-    const result = await vendorAny.getJackpot();
+    const result = normalizeVendorPayload(await vendorAny.getJackpot(), includeVendorRaw);
 
     sendSuccess(res, 'Code1', result);
   } catch (error: any) {

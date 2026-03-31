@@ -16,6 +16,7 @@ export interface JokerResponse {
   error?: string;
   httpStatus?: number;
   durationMs?: number;
+  message?: string;
   rawText?: string;
 }
 
@@ -136,12 +137,27 @@ export class JokerProvider {
 
   /**
    * Generate HMAC-SHA1 signature
-   * Format: Base64(HMAC_SHA1(AppID + Timestamp, SignatureKey))
+   * Spec (v3.0.1):
+   * 1) Take all JSON body fields (case-sensitive names)
+   * 2) Sort field names A–Z
+   * 3) Build raw string like: key1=value1&key2=value2&key3=value3&key4=
+   * 4) HMAC-SHA1(rawString, SignatureKey) -> Base64
+   * 5) URL-escape Base64 when sending as query param (URLSearchParams handles this)
    */
-  private generateSignature(timestamp: number): string {
-    const message = `${this.config.appId}${timestamp}`;
+  private generateSignature(payload: Record<string, any>): string {
+    const keys = Object.keys(payload)
+      .filter((k) => payload[k] !== undefined)
+      .sort();
+
+    const raw = keys
+      .map((k) => {
+        const v = (payload as any)[k];
+        return `${k}=${v === null ? '' : String(v)}`;
+      })
+      .join('&');
+
     const hmac = crypto.createHmac('sha1', this.config.signatureKey);
-    hmac.update(message);
+    hmac.update(raw, 'utf8');
     return hmac.digest('base64');
   }
 
@@ -151,17 +167,18 @@ export class JokerProvider {
   private async request(method: string, body: any): Promise<JokerResponse> {
     const startedAt = Date.now();
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = this.generateSignature(timestamp);
-
-    const url = new URL(this.config.apiUrl);
-    url.searchParams.append('appid', this.config.appId);
-    url.searchParams.append('signature', signature);
 
     const requestBody = {
       Method: method,
       Timestamp: timestamp,
       ...body,
     };
+
+    const signature = this.generateSignature(requestBody as any);
+
+    const url = new URL(this.config.apiUrl);
+    url.searchParams.append('appid', this.config.appId);
+    url.searchParams.append('signature', signature);
 
     try {
       const response = await fetch(url.toString(), {
@@ -175,6 +192,7 @@ export class JokerProvider {
       const durationMs = Date.now() - startedAt;
       const httpStatus = response.status;
       const rawText = await response.text();
+      const contentType = response.headers.get('content-type') || '';
       let parsed: any = null;
       try {
         parsed = rawText ? JSON.parse(rawText) : null;
@@ -182,34 +200,35 @@ export class JokerProvider {
         parsed = null;
       }
 
+      const message =
+        (parsed && typeof parsed === 'object' && typeof parsed.Message === 'string' && parsed.Message.trim().length > 0
+          ? parsed.Message.trim()
+          : parsed && typeof parsed === 'object' && typeof parsed.message === 'string' && parsed.message.trim().length > 0
+            ? parsed.message.trim()
+            : '');
+
       if (!response.ok) {
-        if (response.status === 400) {
-          return {
-            success: false,
-            error: parsed?.Message || `Invalid request: ${response.status}`,
-            data: parsed,
-            httpStatus,
-            durationMs,
-            rawText: rawText ? rawText.slice(0, 8000) : undefined,
-          };
-        }
         if (response.status === 404) {
           return {
             success: false,
-            error: 'Request not found',
+            error: message || 'Request not found',
             data: parsed,
             httpStatus,
             durationMs,
-            rawText: rawText ? rawText.slice(0, 8000) : undefined,
+            message: message || undefined,
+            rawText:
+              !message && rawText && !contentType.includes('application/json') ? rawText.slice(0, 8000) : undefined,
           };
         }
         return {
           success: false,
-          error: `HTTP error: ${response.status}`,
+          error: message || `HTTP error: ${response.status}`,
           data: parsed,
           httpStatus,
           durationMs,
-          rawText: rawText ? rawText.slice(0, 8000) : undefined,
+          message: message || undefined,
+          rawText:
+            !message && rawText && !contentType.includes('application/json') ? rawText.slice(0, 8000) : undefined,
         };
       }
 
@@ -218,7 +237,7 @@ export class JokerProvider {
         data: parsed,
         httpStatus,
         durationMs,
-        rawText: rawText ? rawText.slice(0, 8000) : undefined,
+        message: message || undefined,
       };
     } catch (error) {
       return {

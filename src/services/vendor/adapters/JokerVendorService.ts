@@ -440,18 +440,32 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
     }
   }
 
-  async getGameList(): Promise<any[]> {
+  async getGameList(): Promise<VendorResult & { games?: any[] }> {
     try {
       const provider = await this.initProvider();
       const result = await provider.getGameList();
-
       if (!result.success) {
-        throw new Error(result.error || 'Failed to get game list');
+        return {
+          success: false,
+          error: result.error || result.message || 'Failed to get game list',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
+        };
       }
-
-      return result.data?.games || [];
+      return {
+        success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
+        games: result.data?.games || [],
+      };
     } catch (error: any) {
-      throw new Error(error.message);
+      return {
+        success: false,
+        error: error.message || 'Failed to get game list',
+        vendor: 'Joker',
+      };
     }
   }
 
@@ -459,22 +473,36 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
     startDate: string,
     endDate: string,
     options?: { nextId?: string }
-  ): Promise<any> {
+  ): Promise<VendorResult & { data?: any; nextId?: any; games?: any }> {
     try {
       const provider = await this.initProvider();
       const result = await provider.getTransactionsByHour(startDate, endDate, options);
 
       if (!result.success) {
-        throw new Error(result.error || 'Failed to get transactions');
+        return {
+          success: false,
+          error: result.error || result.message || 'Failed to get transactions',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
+        };
       }
 
       return {
+        success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
         data: result.data?.data,
         nextId: result.data?.nextId,
         games: result.data?.games,
       };
     } catch (error: any) {
-      throw new Error(error.message);
+      return {
+        success: false,
+        error: error.message || 'Failed to get transactions',
+        vendor: 'Joker',
+      };
     }
   }
 
@@ -482,22 +510,36 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
     startDate: string,
     endDate: string,
     options?: { nextId?: string }
-  ): Promise<any> {
+  ): Promise<VendorResult & { data?: any; nextId?: any; games?: any }> {
     try {
       const provider = await this.initProvider();
       const result = await provider.getTransactionsByMinute(startDate, endDate, options);
 
       if (!result.success) {
-        throw new Error(result.error || 'Failed to get transactions');
+        return {
+          success: false,
+          error: result.error || result.message || 'Failed to get transactions',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
+        };
       }
 
       return {
+        success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
         data: result.data?.data,
         nextId: result.data?.nextId,
         games: result.data?.games,
       };
     } catch (error: any) {
-      throw new Error(error.message);
+      return {
+        success: false,
+        error: error.message || 'Failed to get transactions',
+        vendor: 'Joker',
+      };
     }
   }
 
@@ -505,18 +547,34 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
     startDate: string,
     endDate: string,
     username?: string
-  ): Promise<any[]> {
+  ): Promise<VendorResult & { winloss?: any[] }> {
     try {
       const provider = await this.initProvider();
       const result = await provider.getWinloss(startDate, endDate, username);
 
       if (!result.success) {
-        throw new Error(result.error || 'Failed to get winloss data');
+        return {
+          success: false,
+          error: result.error || result.message || 'Failed to get winloss data',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
+        };
       }
 
-      return result.data?.Winloss || [];
+      return {
+        success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
+        winloss: result.data?.Winloss || [],
+      };
     } catch (error: any) {
-      throw new Error(error.message);
+      return {
+        success: false,
+        error: error.message || 'Failed to get winloss data',
+        vendor: 'Joker',
+      };
     }
   }
 
@@ -528,18 +586,25 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       if (!result.success) {
         return {
           success: false,
-          error: result.error || 'Failed to get history URL',
+          error: result.error || result.message || 'Failed to get history URL',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
       return {
         success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
         url: result.data?.Url,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }
@@ -552,18 +617,25 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       if (!result.success) {
         return {
           success: false,
-          error: result.error || 'Failed to get jackpot',
+          error: result.error || result.message || 'Failed to get jackpot',
+          message: result.message,
+          vendor: 'Joker',
+          raw: result,
         };
       }
 
       return {
         success: true,
+        message: result.message || 'OK',
+        vendor: 'Joker',
+        raw: result,
         amount: result.data?.Amount,
       };
     } catch (error: any) {
       return {
         success: false,
         error: error.message,
+        vendor: 'Joker',
       };
     }
   }

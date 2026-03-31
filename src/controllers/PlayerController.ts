@@ -1057,6 +1057,7 @@ export const getNextPlayerId = async (req: AuthRequest, res: Response) => {
 export const retryCreateGameAccount = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const scope = getTenancyScopeOrThrow(req);
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
     const playerId = Number(req.params.id);
     if (!Number.isInteger(playerId) || playerId <= 0) {
       sendError(res, 'Code804', 400);
@@ -1079,6 +1080,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     const existingMeta: any = (player as any).metadata || {};
     const existingAccounts: any[] = Array.isArray(existingMeta.gameAccounts) ? existingMeta.gameAccounts : [];
     const existing = existingAccounts.find((ga) => String(ga?.gameName || '').trim().toLowerCase() === gameName.toLowerCase());
+    const existingAttemptedIds: string[] = Array.isArray(existing?.attemptedIds) ? existing.attemptedIds.map((s: any) => String(s)) : [];
     if (existing && String(existing.accountId || '').trim() && (existing.provisioningStatus || 'CREATED') === 'CREATED') {
       sendSuccess(res, 'Code1', { gameAccount: existing, idempotent: true });
       return;
@@ -1120,12 +1122,20 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
       candidates.add(candidate);
       attemptedIds.push(candidate);
       result = await vendor.createPlayer(candidate);
-      if (result?.success && !isVendorConflict(result)) {
-        finalAccountId = candidate;
-        created = true;
-        break;
+      if (result?.success) {
+        if (!isVendorConflict(result)) {
+          finalAccountId = candidate;
+          created = true;
+          break;
+        }
+        const previouslyAttempted = existingAttemptedIds.some((id) => String(id).trim().toLowerCase() === String(candidate).trim().toLowerCase());
+        if (previouslyAttempted) {
+          finalAccountId = candidate;
+          created = true;
+          break;
+        }
+        continue;
       }
-      if (isVendorConflict(result)) continue;
       break;
     }
 
@@ -1149,7 +1159,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
           { attemptedIds, vendorRaw: (result as any)?.raw },
           getClientIp(req) || null
         );
-        sendError(res, 'Code809', 409, { attemptedIds });
+        sendError(res, 'Code809', 409, { attemptedIds, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
         return;
       }
       const nextAccounts = existingAccounts
@@ -1171,7 +1181,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
         { error: result?.error || 'PV001', attemptedIds, vendorRaw: (result as any)?.raw },
         getClientIp(req) || null
       );
-      sendError(res, 'Code809', 400, { detail: result?.error || 'PV001', attemptedIds });
+      sendError(res, 'Code809', 400, { detail: result?.error || 'PV001', attemptedIds, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
       return;
     }
 
@@ -1203,6 +1213,9 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
       gameAccount: { gameName, accountId: finalAccountId, password, provisioningStatus: 'CREATED', attemptedIds },
       idempotent: false,
       passwordSet: pwdResult.success,
+      vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined,
+      vendorPasswordRaw: includeVendorRaw ? (pwdResult as any)?.raw : undefined,
+      message: pwdResult.success ? 'OK' : (pwdResult.error || pwdResult.message || 'Password set failed'),
     });
   } catch (error: any) {
     sendError(res, 'Code810', 500);
