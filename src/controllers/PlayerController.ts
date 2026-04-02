@@ -1076,7 +1076,7 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
     );
 
     const activeGames = await Game.findAll({
-      attributes: ['name'],
+      attributes: ['name', 'vendor_config'],
       where: withTenancyWhere(scope, { status: 'active' }),
     } as any);
     const activeGameNames = new Set(
@@ -1084,6 +1084,28 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
         String(g.name || '').trim().toLowerCase(),
       ),
     );
+
+    const gameAppIdByNameLower = new Map<string, string>();
+    for (const g of activeGames as any[]) {
+      const name = String(g?.name || '').trim().toLowerCase();
+      if (!name) continue;
+      let cfg: any = (g as any).vendor_config;
+      if (typeof cfg === 'string') {
+        const s = cfg.trim();
+        if (s.startsWith('{') || s.startsWith('[')) {
+          try {
+            cfg = JSON.parse(s);
+          } catch {
+            cfg = null;
+          }
+        } else {
+          cfg = null;
+        }
+      }
+      const appId = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? String((cfg as any).appId || '').trim() : '';
+      if (!appId) continue;
+      gameAppIdByNameLower.set(name, appId);
+    }
 
     const payload = sanitizedPlayers.map((p: any) => {
       const json = p.toJSON ? p.toJSON() : { ...p };
@@ -1095,6 +1117,13 @@ export const searchPlayers = async (req: AuthRequest, res: Response) => {
         const name = String(ga?.gameName || '').trim().toLowerCase();
         if (!name) return false;
         return activeGameNames.has(name);
+      }).map((ga: any) => {
+        const name = String(ga?.gameName || '').trim().toLowerCase();
+        const appId = name ? (gameAppIdByNameLower.get(name) ?? '') : '';
+        const accountId = typeof ga?.accountId === 'string' ? ga.accountId.trim() : '';
+        if (!appId || !accountId) return ga;
+        const displayAccountId = accountId.includes('.') ? accountId : `${appId}.${accountId}`;
+        return { ...ga, displayAccountId };
       });
       return {
         id: json.id,
@@ -1358,9 +1387,24 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
     const baseAccountId = String((player as any).player_game_id || '').trim();
     const FIXED_PASSWORD = 'Abcd12345';
     const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
+    const refreshWalletCredit =
+      typeof (req.query as any)?.refreshWalletCredit === 'string'
+        ? String((req.query as any).refreshWalletCredit).toLowerCase() !== 'false'
+        : typeof (req.body as any)?.refreshWalletCredit === 'boolean'
+          ? Boolean((req.body as any).refreshWalletCredit)
+          : true;
 
     const results: any[] = [];
     const newAccounts: any[] = [];
+
+    const normalizeUsernameCandidates = (raw: any): string[] => {
+      const v = String(raw || '').trim();
+      if (!v) return [];
+      if (!v.includes('.')) return [v];
+      const parts = v.split('.').filter(Boolean);
+      const last = parts.length > 0 ? parts[parts.length - 1] : '';
+      return last && last !== v ? [v, last] : [v];
+    };
 
     const processGame = async (game: any, useApi: boolean) => {
       const gameName = String(game?.name || '').trim();
@@ -1483,33 +1527,105 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
       await processGame(g, false);
     }
 
-    if (newAccounts.length === 0) {
-      sendSuccess(res, 'Code1', {
-        updated: false,
-        results,
-        gameAccounts: existingAccounts,
-      });
-      return;
+    const activeApiByNameLower = new Map<string, any>();
+    for (const g of activeApiGames as any[]) {
+      const name = String(g?.name || '').trim();
+      if (!name) continue;
+      activeApiByNameLower.set(name.toLowerCase(), g);
     }
 
-    (player as any).metadata = {
-      ...existingMeta,
-      gameAccounts: existingAccounts.concat(newAccounts),
+    const vendorByGameId = new Map<number, any>();
+    const getVendorForGame = async (game: any) => {
+      const gid = Number(game?.id ?? null);
+      if (!Number.isFinite(gid) || gid <= 0) return null;
+      if (vendorByGameId.has(gid)) return vendorByGameId.get(gid);
+      const providerCode = (game as any)?.Product?.providerCode;
+      const vendor =
+        typeof providerCode === 'number'
+          ? await VendorFactory.getServiceByProviderCode(providerCode, gid)
+          : null;
+      vendorByGameId.set(gid, vendor);
+      return vendor;
     };
-    await player.save();
+
+    const runPool = async <T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
+      const results: R[] = new Array(items.length) as any;
+      let cursor = 0;
+      const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+        while (cursor < items.length) {
+          const idx = cursor++;
+          results[idx] = await fn(items[idx]);
+        }
+      });
+      await Promise.all(workers);
+      return results;
+    };
+
+    const baseAccounts = existingAccounts.concat(newAccounts);
+    let walletChanged = false;
+    const walletRefreshResults: any[] = [];
+    let nextAccounts = baseAccounts.map((ga) => (ga && typeof ga === 'object' ? { ...ga } : ga));
+
+    if (refreshWalletCredit && nextAccounts.length > 0) {
+      const entries = nextAccounts
+        .map((ga, index) => ({ ga, index }))
+        .filter(({ ga }) => ga && typeof ga === 'object');
+
+      await runPool(entries, 3, async ({ ga, index }) => {
+        const gameName = String((ga as any)?.gameName || '').trim().toLowerCase();
+        const game = gameName ? activeApiByNameLower.get(gameName) : null;
+        const accountId = String((ga as any)?.accountId || '').trim();
+        if (!game || !accountId) {
+          return null as any;
+        }
+        const vendor = await getVendorForGame(game);
+        if (!vendor) {
+          walletRefreshResults.push({ gameName: (ga as any)?.gameName, ok: false, message: 'Vendor service not available' });
+          return null as any;
+        }
+
+        const candidates = normalizeUsernameCandidates(accountId);
+        for (const candidate of candidates) {
+          const bal = await vendor.getBalance(candidate);
+          if (bal?.success && typeof bal.credit === 'number' && Number.isFinite(bal.credit)) {
+            const prev = (nextAccounts[index] as any)?.walletCredit;
+            const next = Number(bal.credit);
+            if (prev == null || Number(prev) !== next) walletChanged = true;
+            (nextAccounts[index] as any).walletCredit = next;
+            walletRefreshResults.push({ gameName: (ga as any)?.gameName, ok: true, credit: next });
+            return null as any;
+          }
+        }
+
+        walletRefreshResults.push({ gameName: (ga as any)?.gameName, ok: false, message: 'Balance fetch failed' });
+        return null as any;
+      });
+    }
+
+    const addedAccounts = newAccounts.length;
+    const updated = addedAccounts > 0 || walletChanged;
+    if (updated) {
+      (player as any).metadata = {
+        ...existingMeta,
+        gameAccounts: nextAccounts,
+      };
+      await player.save();
+    }
 
     await logAudit(
       req.user?.id ?? null,
       'PLAYER_SYNC_ACTIVE_GAME_ACCOUNTS',
       { playerId },
-      { added: newAccounts.length, results },
+      { added: addedAccounts, refreshWalletCredit, walletRefreshResults, results },
       getClientIp(req) || null,
     );
 
     sendSuccess(res, 'Code1', {
-      updated: true,
+      updated,
       results,
-      gameAccounts: (player as any).metadata?.gameAccounts || [],
+      refreshWalletCredit,
+      walletRefreshResults,
+      gameAccounts: updated ? (player as any).metadata?.gameAccounts || [] : existingAccounts,
     });
   } catch (error: any) {
     sendError(res, 'Code810', 500);
