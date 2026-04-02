@@ -4,58 +4,12 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import fs from 'fs';
-import path from 'path';
 
 dotenv.config();
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
 
 const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT } = process.env;
-
-type InitAdminCredentialRecord = {
-  createdAt: string;
-  username: string;
-  fullName: string;
-  password?: string;
-  apiKeyGenerated?: boolean;
-  status: 'created' | 'already_exists';
-};
-
-const persistInitAdminCredentials = (record: InitAdminCredentialRecord) => {
-  const baseDir = (process.env.INIT_ADMIN_CREDENTIALS_DIR || '').trim();
-  const outDir = baseDir.length > 0 ? baseDir : path.join(process.cwd(), '.secure');
-  const outFile = path.join(outDir, 'init_admin_credentials.json');
-
-  try {
-    fs.mkdirSync(outDir, { recursive: true });
-  } catch {
-  }
-
-  let existing: any = [];
-  try {
-    if (fs.existsSync(outFile)) {
-      const raw = fs.readFileSync(outFile, 'utf8');
-      existing = JSON.parse(raw);
-    }
-  } catch {
-    existing = [];
-  }
-
-  const next = Array.isArray(existing) ? [...existing, record] : [existing, record];
-
-  try {
-    fs.writeFileSync(outFile, JSON.stringify(next, null, 2), { encoding: 'utf8' });
-    try {
-      fs.chmodSync(outFile, 0o600);
-    } catch {
-    }
-    console.log(`Init admin credentials saved to: ${outFile}`);
-  } catch (e) {
-    console.log('Failed to persist init admin credentials file.');
-    console.log(e);
-  }
-};
 
 const PERMISSIONS = [
   // --- Routes ---
@@ -230,32 +184,17 @@ async function initDb() {
     console.log('Roles seeded.');
 
     // Create Admin User
-    const storedAdminUsernameSetting = await Setting.findByPk('init_admin_username');
-    const storedAdminUsername =
-      storedAdminUsernameSetting && typeof (storedAdminUsernameSetting as any).value === 'string'
-        ? String((storedAdminUsernameSetting as any).value).trim()
-        : null;
-
     const adminUsernameFromEnv = (process.env.INIT_ADMIN_USERNAME || '').trim();
     const adminFullNameFromEnv = (process.env.INIT_ADMIN_FULL_NAME || '').trim();
     const adminPasswordFromEnv = (process.env.INIT_ADMIN_PASSWORD || '').trim();
 
-    const generatedUsername = `sys_${crypto.randomBytes(9).toString('hex')}`;
+    // 固定管理员用户名，密码随机生成
+    const fixedAdminUsername = 'superadminsparkx';
     const generatedPassword = crypto.randomBytes(24).toString('base64url');
 
-    const adminUsername = adminUsernameFromEnv || storedAdminUsername || generatedUsername;
+    const adminUsername = adminUsernameFromEnv || fixedAdminUsername;
     const adminPassword = adminPasswordFromEnv || generatedPassword;
     const adminFullName = adminFullNameFromEnv || 'System Admin';
-
-    if (!storedAdminUsername && !adminUsernameFromEnv) {
-      await Setting.findOrCreate({
-        where: { key: 'init_admin_username' },
-        defaults: {
-          key: 'init_admin_username',
-          value: adminUsername,
-        },
-      });
-    }
 
     const hashedPassword = await bcrypt.hash(adminPassword, 10);
 
@@ -274,22 +213,20 @@ async function initDb() {
     });
 
     if (created) {
-      console.log('Admin user created.');
-      persistInitAdminCredentials({
-        createdAt: new Date().toISOString(),
-        username: adminUsername,
-        fullName: adminFullName,
-        password: adminPassword,
-        status: 'created',
-      });
+      console.log('==============================================');
+      console.log('🎉 Admin user created successfully!');
+      console.log('==============================================');
+      console.log(`Username: ${adminUsername}`);
+      console.log(`Password: ${adminPassword}`);
+      console.log(`Full Name: ${adminFullName}`);
+      console.log('==============================================');
+      console.log('⚠️  IMPORTANT: Save these credentials securely!');
+      console.log('==============================================');
     } else {
-      console.log('Admin user already exists.');
-      persistInitAdminCredentials({
-        createdAt: new Date().toISOString(),
-        username: adminUsername,
-        fullName: adminFullName,
-        status: 'already_exists',
-      });
+      console.log('==============================================');
+      console.log('ℹ️  Admin user already exists.');
+      console.log(`Username: ${adminUsername}`);
+      console.log('==============================================');
     }
 
     if (!admin.full_name && adminFullName) {
