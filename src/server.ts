@@ -13,7 +13,7 @@ import { productionErrorHandler, notFoundHandler, setupGlobalErrorHandlers } fro
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT;
 
 const rawCorsOrigins = (process.env.CORS_ORIGINS || '').trim();
 const extraAllowedOrigins = rawCorsOrigins

@@ -1,16 +1,14 @@
 import sequelize from '../config/database';
-import { User, Permission, Role, Setting, Tenant, SubBrand, Player, Game, Product, Transaction, BankAccount, AuditLog, LandingPage, LandingPageVisit, LandingPageEvent, PlayerStats, GameAdjustment } from '../models';
+import { User, Permission, Role, Setting, Tenant, SubBrand } from '../models';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const generateApiKey = () => crypto.randomBytes(32).toString('hex');
 
-const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT } = process.env;
-
+// Permission definitions
 const PERMISSIONS = [
   // --- Routes ---
   { slug: 'route:dashboard', description: 'Access Dashboard' },
@@ -44,16 +42,13 @@ const PERMISSIONS = [
   { slug: 'action:withdrawal_create', description: 'Create Withdrawal' },
   { slug: 'action:burn_create', description: 'Create Walve' },
   { slug: 'action:transaction_edit', description: 'Edit Transaction' },
-  
   { slug: 'action:bank_create', description: 'Create Bank' },
   { slug: 'action:bank_edit', description: 'Edit Bank' },
   { slug: 'action:bank_delete', description: 'Delete Bank' },
   { slug: 'action:bank_adjust', description: 'Adjust Balance' },
-  
   { slug: 'action:player_create', description: 'Create Player' },
   { slug: 'action:player_edit', description: 'Edit Player' },
   { slug: 'action:player_banks_edit', description: 'Edit Player Bank Accounts' },
-
   { slug: 'action:user_view', description: 'View Users' },
   { slug: 'action:user_create', description: 'Create Users' },
   { slug: 'action:user_edit', description: 'Edit Users' },
@@ -73,7 +68,7 @@ const ROLES = [
     name: 'Super Admin',
     description: 'Full access to all system features',
     isSystem: true,
-    permissions: ['*'] // Special flag for all
+    permissions: ['*']
   },
   {
     name: 'Operator',
@@ -96,39 +91,28 @@ const ROLES = [
   }
 ];
 
-async function createDatabase() {
-  try {
-    const connection = await mysql.createConnection({
-      host: DB_HOST,
-      user: DB_USER,
-      password: DB_PASSWORD,
-      port: Number(DB_PORT) || 3306,
-    });
-
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;`);
-    console.log(`Database ${DB_NAME} created or already exists.`);
-    await connection.end();
-  } catch (error) {
-    console.error('Error creating database:', error);
-    process.exit(1);
-  }
-}
-
 async function initDb() {
+  console.log('========================================');
+  console.log('🔧 Database Initialization Started');
+  console.log('========================================');
+  console.log(`Database: ${process.env.DB_NAME || 'sparkx_db'}`);
+  console.log(`Host: ${process.env.DB_SOCKET_PATH || process.env.DB_HOST || 'localhost'}`);
+  console.log('========================================\n');
+
   try {
-    await createDatabase();
-
+    // Test database connection
+    console.log('⏳ Testing database connection...');
     await sequelize.authenticate();
-    console.log('Database connected.');
+    console.log('✅ Database connected successfully.\n');
 
-    // Sync models
+    // Sync models (create tables)
+    console.log('⏳ Syncing database tables...');
     await sequelize.sync({ alter: true });
-    console.log('Database synced.');
+    console.log('✅ Database tables synced.\n');
 
+    // Initialize default tenant
     const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim() || 'sparkx';
-    const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim() || 'sparkx';
-    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim() || 'sparkx';
-    const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim() || 'sparkx';
+    const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim() || 'SparkX';
 
     const [defaultTenant] = await Tenant.findOrCreate({
       where: { prefix: defaultTenantPrefix },
@@ -138,6 +122,11 @@ async function initDb() {
         status: 'active',
       },
     });
+    console.log(`✅ Default tenant ready: ${defaultTenant.name} (${defaultTenant.prefix})`);
+
+    // Initialize default sub-brand
+    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim() || 'main';
+    const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim() || 'Main Brand';
 
     const [defaultSubBrand] = await SubBrand.findOrCreate({
       where: { code: defaultSubBrandCode },
@@ -148,19 +137,22 @@ async function initDb() {
         status: 'active',
       },
     });
+    console.log(`✅ Default sub-brand ready: ${defaultSubBrand.name} (${defaultSubBrand.code})\n`);
 
     // Seed Permissions
+    console.log('⏳ Seeding permissions...');
     for (const p of PERMISSIONS) {
       await Permission.findOrCreate({
         where: { slug: p.slug },
         defaults: p,
       });
     }
-    console.log('Permissions seeded.');
+    console.log(`✅ ${PERMISSIONS.length} permissions ready.\n`);
 
     // Seed Roles
+    console.log('⏳ Seeding roles...');
     for (const r of ROLES) {
-      const [role, created] = await Role.findOrCreate({
+      const [role] = await Role.findOrCreate({
         where: { name: r.name },
         defaults: {
           name: r.name,
@@ -169,6 +161,7 @@ async function initDb() {
         }
       });
 
+      // Assign permissions
       if (r.permissions.includes('*')) {
         const allPerms = await Permission.findAll();
         // @ts-ignore
@@ -181,20 +174,15 @@ async function initDb() {
         await role.setPermissions(perms);
       }
     }
-    console.log('Roles seeded.');
+    console.log(`✅ ${ROLES.length} roles ready.\n`);
 
     // Create Admin User
-    const adminUsernameFromEnv = (process.env.INIT_ADMIN_USERNAME || '').trim();
-    const adminFullNameFromEnv = (process.env.INIT_ADMIN_FULL_NAME || '').trim();
-    const adminPasswordFromEnv = (process.env.INIT_ADMIN_PASSWORD || '').trim();
+    console.log('⏳ Creating admin user...');
 
-    // 固定管理员用户名，密码随机生成
-    const fixedAdminUsername = 'superadminsparkx';
-    const generatedPassword = crypto.randomBytes(24).toString('base64url');
-
-    const adminUsername = adminUsernameFromEnv || fixedAdminUsername;
-    const adminPassword = adminPasswordFromEnv || generatedPassword;
-    const adminFullName = adminFullNameFromEnv || 'System Admin';
+    // Fixed admin credentials
+    const adminUsername = 'superadmin';
+    const adminPassword = crypto.randomBytes(16).toString('base64url');
+    const adminFullName = 'System Administrator';
 
     const hashedPassword = await bcrypt.hash(adminPassword, 10);
 
@@ -213,149 +201,60 @@ async function initDb() {
     });
 
     if (created) {
-      console.log('==============================================');
-      console.log('🎉 Admin user created successfully!');
-      console.log('==============================================');
+      // Assign Super Admin role
+      const superAdminRole = await Role.findOne({ where: { name: 'Super Admin' } });
+      if (superAdminRole) {
+        // @ts-ignore
+        await admin.setRoles([superAdminRole]);
+      }
+
+      console.log('\n========================================');
+      console.log('🎉 ADMIN USER CREATED');
+      console.log('========================================');
       console.log(`Username: ${adminUsername}`);
       console.log(`Password: ${adminPassword}`);
       console.log(`Full Name: ${adminFullName}`);
-      console.log('==============================================');
-      console.log('⚠️  IMPORTANT: Save these credentials securely!');
-      console.log('==============================================');
+      console.log('========================================');
+      console.log('⚠️  IMPORTANT: Save these credentials now!');
+      console.log('   This password will NOT be shown again.');
+      console.log('========================================\n');
     } else {
-      console.log('==============================================');
-      console.log('ℹ️  Admin user already exists.');
-      console.log(`Username: ${adminUsername}`);
-      console.log('==============================================');
+      console.log(`ℹ️  Admin user '${adminUsername}' already exists.\n`);
     }
 
-    if (!admin.full_name && adminFullName) {
-      admin.full_name = adminFullName;
-      await admin.save();
-    }
+    // Initialize Settings
+    console.log('⏳ Initializing settings...');
 
-    if (!admin.api_key) {
-      admin.api_key = generateApiKey();
-      await admin.save();
-      console.log('Admin API key generated.');
-    }
-
-    if (!admin.tenant_id) {
-      admin.tenant_id = defaultTenant.id as any;
-    }
-    if (!admin.sub_brand_id) {
-      admin.sub_brand_id = defaultSubBrand.id as any;
-    }
-    if (!admin.is_super_admin) {
-      admin.is_super_admin = true as any;
-    }
-    await admin.save();
-
-    // Assign Super Admin role to admin
-    const superAdminRole = await Role.findOne({ where: { name: 'Super Admin' } });
-    if (superAdminRole) {
-       // @ts-ignore
-       await admin.setRoles([superAdminRole]);
-       console.log('Admin assigned Super Admin role.');
-    }
-
-    const usersMissingScope: any[] = await User.findAll({
-      where: { tenant_id: null } as any,
-    });
-    for (const u of usersMissingScope) {
-      u.tenant_id = defaultTenant.id as any;
-      u.sub_brand_id = defaultSubBrand.id as any;
-      await u.save();
-    }
-
-    await Player.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await Game.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await Product.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await Transaction.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await BankAccount.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-
-    await AuditLog.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await LandingPage.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await LandingPageVisit.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await LandingPageEvent.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await PlayerStats.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    await GameAdjustment.update(
-      { tenant_id: defaultTenant.id as any, sub_brand_id: defaultSubBrand.id as any } as any,
-      { where: { tenant_id: null } as any },
-    );
-    
-    const usersWithoutKey: any[] = await User.findAll({ where: { api_key: null } as any });
-    for (const user of usersWithoutKey) {
-      user.api_key = generateApiKey();
-      await user.save();
-    }
-
-    // Seed Player Metadata Settings
-    const defaultReferralSources = [
-      'Google',
-      'Facebook',
-      'Telegram',
-      'Line',
-      'Friend',
-    ];
-
+    const defaultReferralSources = ['Google', 'Facebook', 'Telegram', 'Line', 'Friend'];
     const defaultPlayerTags = [
-      { name: 'New', color: '#3b82f6' }, // Blue
-      { name: 'VIP', color: '#f97316' }, // Orange
-      { name: 'Bonus Hunter', color: '#ef4444' }, // Red
-      { name: 'Regular', color: '#22c55e' }, // Green
+      { name: 'New', color: '#3b82f6' },
+      { name: 'VIP', color: '#f97316' },
+      { name: 'Bonus Hunter', color: '#ef4444' },
+      { name: 'Regular', color: '#22c55e' },
     ];
 
     await Setting.findOrCreate({
       where: { key: 'referralSources' },
-      defaults: {
-        key: 'referralSources',
-        value: defaultReferralSources
-      }
+      defaults: { key: 'referralSources', value: defaultReferralSources }
     });
 
     await Setting.findOrCreate({
       where: { key: 'tagOptions' },
-      defaults: {
-        key: 'tagOptions',
-        value: defaultPlayerTags
-      }
+      defaults: { key: 'tagOptions', value: defaultPlayerTags }
     });
-    
+
+    console.log('✅ Default settings ready.\n');
+
+    console.log('========================================');
+    console.log('✅ DATABASE INITIALIZATION COMPLETE');
+    console.log('========================================');
+    console.log('You can now start using the application.');
+    console.log('========================================');
 
     process.exit(0);
   } catch (error) {
-    console.error('Error initializing DB:', error);
+    console.error('\n❌ ERROR: Database initialization failed:');
+    console.error(error);
     process.exit(1);
   }
 }
