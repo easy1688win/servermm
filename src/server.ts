@@ -182,9 +182,7 @@ const startServer = async () => {
     
     await sequelize.authenticate();    
     app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`📡 Trust proxy: ${app.get('trust proxy')}`);
+      console.log(`🚀 Server running...`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
