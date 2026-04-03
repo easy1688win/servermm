@@ -15,32 +15,34 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT;
 
-const rawCorsOrigins = (process.env.CORS_ORIGINS || '').trim();
-const extraAllowedOrigins = rawCorsOrigins
-  ? rawCorsOrigins
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  : [];
+const exactOrigins = new Set<string>(
+  (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
-const staticAllowedOrigins = new Set<string>([
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'https://antmarkerting.pages.dev',
-  'https://admin-1mo.pages.dev',
-  ...extraAllowedOrigins,
-]);
+const allowedDomains = new Set<string>(
+  (process.env.CORS_DOMAINS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+const allowAny =
+  String(process.env.CORS_ALLOW_ANY || '').trim().toLowerCase() === 'true';
 
 const isAllowedOrigin = (origin: string) => {
-  if (staticAllowedOrigins.has(origin)) {
+  if (allowAny) return true;
+  if (exactOrigins.has(origin)) {
     return true;
   }
 
   try {
     const url = new URL(origin);
     const host = url.hostname.toLowerCase();
-    if (host === 'megainfinite88.com' || host.endsWith('.megainfinite88.com')) {
-      return true;
+    for (const d of allowedDomains) {
+      if (host === d || host.endsWith(`.${d}`)) return true;
     }
   } catch {
     return false;
