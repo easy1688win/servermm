@@ -35,6 +35,7 @@ User.init({
   username: {
     type: DataTypes.STRING,
     allowNull: false,
+    unique: true,
   },
   password_hash: {
     type: DataTypes.STRING,
@@ -96,9 +97,7 @@ User.init({
   sequelize,
   modelName: 'User',
   tableName: 'users',
-  indexes: [
-    { unique: true, fields: ['sub_brand_id', 'username'] },
-  ],
+  indexes: [],
   hooks: {
     beforeCreate: (instance: User) => {
       if (instance.api_key && !isEncrypted(instance.api_key)) {

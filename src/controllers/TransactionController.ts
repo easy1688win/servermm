@@ -321,7 +321,6 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       }
 
       const txWhere: any = {
-        status: 'COMPLETED',
         created_at: { [Op.between]: [startDate, endDate] },
         type: { [Op.in]: ['DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BURN'] },
       };

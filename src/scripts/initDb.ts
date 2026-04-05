@@ -3,6 +3,7 @@ import { User, Permission, Role, Setting, Tenant, SubBrand } from '../models';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import { SYSTEM_ROLE_DESCRIPTIONS, SYSTEM_ROLE_NAMES } from '../constants/systemRoles';
 
 dotenv.config();
 
@@ -65,15 +66,15 @@ const PERMISSIONS = [
 
 const ROLES = [
   {
-    name: 'Super Admin',
-    description: 'Full access to all system features',
+    name: SYSTEM_ROLE_NAMES.superAdmin,
+    description: SYSTEM_ROLE_DESCRIPTIONS.superAdmin,
     isSystem: true,
     permissions: ['*']
   },
   {
-    name: 'Operator',
-    description: 'Can process transactions and manage players',
-    isSystem: false,
+    name: SYSTEM_ROLE_NAMES.operator,
+    description: SYSTEM_ROLE_DESCRIPTIONS.operator,
+    isSystem: true,
     permissions: [
       'route:dashboard', 'route:transactions', 'route:transaction_history', 'route:players',
       'action:deposit_create', 'action:withdrawal_create', 'action:player_create', 'action:player_edit',
@@ -81,9 +82,9 @@ const ROLES = [
     ]
   },
   {
-    name: 'Viewer',
-    description: 'Read-only access to reports and balances',
-    isSystem: false,
+    name: SYSTEM_ROLE_NAMES.staff,
+    description: SYSTEM_ROLE_DESCRIPTIONS.staff,
+    isSystem: true,
     permissions: [
       'route:dashboard', 'route:reports', 'route:banks',
       'view:bank_balance'
@@ -111,7 +112,7 @@ async function initDb() {
     console.log('✅ Database tables synced.\n');
 
     // Initialize default tenant
-    const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim();
+    const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim().toUpperCase();
     const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim();
 
     const [defaultTenant] = await Tenant.findOrCreate({
@@ -125,7 +126,7 @@ async function initDb() {
     console.log(`✅ Default tenant ready: ${defaultTenant.name} (${defaultTenant.prefix})`);
 
     // Initialize default sub-brand
-    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim();
+    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim().toUpperCase();
     const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim();
 
     const [defaultSubBrand] = await SubBrand.findOrCreate({

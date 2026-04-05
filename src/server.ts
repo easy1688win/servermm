@@ -9,6 +9,7 @@ import { checkMaintenanceMode } from './middleware/maintenance';
 import { trackLandingEventGif, trackLandingPageViewGif } from './controllers/LandingTrackingController';
 import { generalRateLimit, authRateLimit, uploadRateLimit, trackingRateLimit } from './middleware/rateLimit';
 import { productionErrorHandler, notFoundHandler, setupGlobalErrorHandlers } from './middleware/errorHandler';
+import { requireAppSignature } from './middleware/appSignature';
 
 dotenv.config();
 
@@ -79,8 +80,8 @@ app.use('/lp', (req, res, next) => {
 });
 app.options(/.*/, cors(corsOptions));
 app.use(cookieParser());
-app.use(express.text({ type: 'text/plain', limit: '5mb' }));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.text({ type: 'text/plain', limit: '5mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
+app.use(express.json({ limit: '5mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
@@ -98,6 +99,7 @@ app.post('/lp/event.gif', trackLandingEventGif);
 
 // API通用速率限制
 app.use('/api', generalRateLimit);
+app.use('/api', requireAppSignature);
 app.use('/api', routes);
 
 // 404处理 - 必须在所有路由之后

@@ -4,6 +4,12 @@ import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
 import { flushCache } from '../services/CacheService';
 import { sendSuccess, sendError } from '../utils/response';
+import { RESERVED_ROLE_NAMES, normalizeRoleName } from '../constants/systemRoles';
+
+const isProtectedSystemRoleName = (name: unknown): boolean => {
+  const lower = normalizeRoleName(name).toLowerCase();
+  return lower === 'viewer' || RESERVED_ROLE_NAMES.has(lower);
+};
 
 export const getRoleNames = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -120,9 +126,10 @@ export const createRole = async (req: AuthRequest, res: Response): Promise<void>
   try {
     const { name, description, permissions } = req.body; // permissions is array of slugs
 
-    const normalizedName = String(name || '').trim().toLowerCase();
-    if (normalizedName === 'super admin') {
-      sendError(res, 'Code1102', 403);
+    const normalizedNameLower = normalizeRoleName(name).toLowerCase();
+    const reserved = new Set([...Array.from(RESERVED_ROLE_NAMES), 'viewer']);
+    if (reserved.has(normalizedNameLower)) {
+      sendError(res, 'Code1112', 403);
       return;
     }
 
@@ -166,11 +173,26 @@ export const updateRole = async (req: AuthRequest, res: Response): Promise<void>
         permissions: role.Permissions.map((p: any) => p.slug)
     };
 
-    if (role.isSystem) {
-       // Optional: Prevent renaming system roles, but allow permission updates?
+    const isProtected = Boolean(role.isSystem) || isProtectedSystemRoleName(role.name);
+    if (isProtected) {
+      const nextName = name != null ? normalizeRoleName(name) : null;
+      const nextDescription = description != null ? String(description) : null;
+      if ((nextName != null && nextName !== role.name) || (nextDescription != null && nextDescription !== role.description)) {
+        sendError(res, 'Code1111', 403);
+        return;
+      }
+    } else {
+      const normalizedNameLower = name != null ? normalizeRoleName(name).toLowerCase() : '';
+      const reserved = new Set([...Array.from(RESERVED_ROLE_NAMES), 'viewer']);
+      if (normalizedNameLower && reserved.has(normalizedNameLower)) {
+        sendError(res, 'Code1112', 403);
+        return;
+      }
     }
 
-    await role.update({ name, description });
+    const nextName = isProtected ? role.name : (name != null ? normalizeRoleName(name) : role.name);
+    const nextDescription = isProtected ? role.description : (description != null ? String(description) : role.description);
+    await role.update({ name: nextName, description: nextDescription });
 
     if (permissions) {
       const perms = await Permission.findAll({
@@ -180,7 +202,7 @@ export const updateRole = async (req: AuthRequest, res: Response): Promise<void>
       await role.setPermissions(perms);
     }
 
-    const newData = { name, description, permissions };
+    const newData = { name: nextName, description: nextDescription, permissions };
     await logAudit(req.user?.id, 'ROLE_UPDATE', originalData, newData, getClientIp(req) || undefined);
     flushCache(); // Invalidate permission cache
 
@@ -200,7 +222,7 @@ export const deleteRole = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
-    if (role.isSystem) {
+    if (role.isSystem || isProtectedSystemRoleName(role.name)) {
       sendError(res, 'Code1108', 403);
       return;
     }

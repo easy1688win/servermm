@@ -17,6 +17,7 @@ import landingPageRoutes from './landingPageRoutes';
 import productRoutes from './productRoutes';
 import tenantRoutes from './tenantRoutes';
 import subBrandRoutes from './subBrandRoutes';
+import reportRoutes from './reportRoutes';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { requirePermission, requireAnyPermission } from '../middleware/permission';
 import { getMaintenanceStatus } from '../middleware/maintenance';
@@ -44,6 +45,7 @@ router.use('/utility', utilityRoutes);
 router.use('/landing-pages', landingPageRoutes);
 router.use('/tenants', tenantRoutes);
 router.use('/sub-brands', subBrandRoutes);
+router.use('/reports', reportRoutes);
 
 router.get('/maintenance', getMaintenanceStatus);
 

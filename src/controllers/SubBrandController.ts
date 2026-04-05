@@ -1,9 +1,12 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
+import { Op } from 'sequelize';
 import { Role, SubBrand, Tenant, User } from '../models';
 import { sendError, sendSuccess } from '../utils/response';
 
 const normalizeStatus = (raw: any): 'active' | 'inactive' => (raw === 'inactive' ? 'inactive' : 'active');
+const normalizeCode = (raw: string) => raw.trim().toUpperCase();
+const isValidCode = (raw: string) => /^[A-Z]{5}$/.test(raw);
 
 const isRequesterSuperAdmin = (req: AuthRequest, requester: any): boolean => {
   return (
@@ -76,11 +79,16 @@ export const createSubBrand = async (req: AuthRequest, res: Response): Promise<v
 
     const tenantId = Number(req.body?.tenant_id ?? req.body?.tenantId ?? null);
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+    const codeRaw = typeof req.body?.code === 'string' ? req.body.code : '';
+    const code = normalizeCode(codeRaw);
     const status = normalizeStatus(req.body?.status);
 
     if (!Number.isFinite(tenantId) || tenantId <= 0 || !name || !code) {
       sendError(res, 'Code1211', 400);
+      return;
+    }
+    if (!isValidCode(code)) {
+      sendError(res, 'Code1211', 400, { detail: 'settings_subbrands_code_must_be_5_letters' });
       return;
     }
 
@@ -140,6 +148,8 @@ export const updateSubBrand = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
 
+    const previousStatus = String((sb as any).status ?? 'active') as 'active' | 'inactive';
+
     if (!isSuperAdmin) {
       const requesterTenantId = Number((requester as any).tenant_id ?? null);
       const sbTenantId = Number((sb as any).tenant_id ?? null);
@@ -150,21 +160,80 @@ export const updateSubBrand = async (req: AuthRequest, res: Response): Promise<v
     }
 
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+    const codeRaw = typeof req.body?.code === 'string' ? req.body.code : '';
+    const code = normalizeCode(codeRaw);
     const status = req.body?.status !== undefined ? normalizeStatus(req.body.status) : undefined;
-
-    if (code) {
-      const existing = await SubBrand.findOne({ where: { code } as any });
-      if (existing && existing.id !== sb.id) {
-        sendError(res, 'Code1213', 409);
+    const incomingTenantIdRaw = req.body?.tenant_id ?? req.body?.tenantId;
+    if (incomingTenantIdRaw !== undefined && incomingTenantIdRaw !== null) {
+      const incomingTenantId = Number(incomingTenantIdRaw);
+      const currentTenantId = Number((sb as any).tenant_id ?? null);
+      if (Number.isFinite(incomingTenantId) && Number.isFinite(currentTenantId) && incomingTenantId !== currentTenantId) {
+        sendError(res, 'Code1211', 400, { detail: 'settings_subbrands_parent_brand_immutable' });
         return;
       }
-      (sb as any).code = code;
+    }
+
+    if (codeRaw && code && code !== String((sb as any).code ?? '').trim().toUpperCase()) {
+      sendError(res, 'Code1211', 400, { detail: 'settings_subbrands_code_immutable' });
+      return;
     }
     if (name) (sb as any).name = name;
     if (status) (sb as any).status = status;
 
-    await sb.save();
+    const nextStatus = String((sb as any).status ?? 'active') as 'active' | 'inactive';
+
+    const sequelize = (SubBrand as any).sequelize;
+    if (sequelize) {
+      await sequelize.transaction(async (t: any) => {
+        await sb.save({ transaction: t });
+        if (previousStatus !== 'inactive' && nextStatus === 'inactive') {
+          await User.update(
+            { status: 'locked' } as any,
+            {
+              where: {
+                sub_brand_id: sb.id,
+                status: { [Op.ne]: 'locked' },
+              } as any,
+              transaction: t,
+            },
+          );
+        } else if (previousStatus === 'inactive' && nextStatus === 'active') {
+          await User.update(
+            { status: 'active' } as any,
+            {
+              where: {
+                sub_brand_id: sb.id,
+                status: 'locked',
+              } as any,
+              transaction: t,
+            },
+          );
+        }
+      });
+    } else {
+      await sb.save();
+      if (previousStatus !== 'inactive' && nextStatus === 'inactive') {
+        await User.update(
+          { status: 'locked' } as any,
+          {
+            where: {
+              sub_brand_id: sb.id,
+              status: { [Op.ne]: 'locked' },
+            } as any,
+          },
+        );
+      } else if (previousStatus === 'inactive' && nextStatus === 'active') {
+        await User.update(
+          { status: 'active' } as any,
+          {
+            where: {
+              sub_brand_id: sb.id,
+              status: 'locked',
+            } as any,
+          },
+        );
+      }
+    }
     sendSuccess(res, 'Code1217', sb);
   } catch {
     sendError(res, 'Code1218', 500);

@@ -372,7 +372,7 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
       }
     }
 
-    const existing = await User.findOne({ where: { username, sub_brand_id: resolvedSubBrand.id } as any });
+    const existing = await User.findOne({ where: { username } as any });
     if (existing) {
         sendError(res, 'Code605', 400); // Username already exists
         return;
