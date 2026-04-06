@@ -1,10 +1,21 @@
 import { DataTypes, Model } from 'sequelize';
 import sequelize from '../config/database';
 import { encrypt, decrypt, isEncrypted } from '../utils/encryption';
+import { randomBytes } from 'crypto';
+
+const generateProfileUuid = (): string => {
+  const bytes = randomBytes(6);
+  let out = '';
+  for (let i = 0; i < 6; i++) {
+    out += String(bytes[i] % 10);
+  }
+  return out;
+};
 
 class Player extends Model {
   public id!: number;
   public player_game_id!: string;
+  public profile_uuid!: string;
   public tenant_id!: number | null;
   public sub_brand_id!: number | null;
   public tags!: any;
@@ -22,6 +33,10 @@ Player.init({
   player_game_id: {
     type: DataTypes.STRING,
     allowNull: false,
+  },
+  profile_uuid: {
+    type: DataTypes.STRING(6),
+    allowNull: true,
   },
   tenant_id: {
     type: DataTypes.INTEGER,
@@ -45,10 +60,24 @@ Player.init({
   tableName: 'players',
   indexes: [
     { unique: true, fields: ['sub_brand_id', 'player_game_id'] },
+    { unique: true, fields: ['profile_uuid'] },
     { fields: ['tenant_id', 'sub_brand_id'] },
   ],
   hooks: {
-    beforeCreate: (instance: Player) => {
+    beforeCreate: async (instance: Player) => {
+      if (!instance.profile_uuid) {
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const candidate = generateProfileUuid();
+          const exists = await Player.count({ where: { profile_uuid: candidate } });
+          if (!exists) {
+            instance.profile_uuid = candidate;
+            break;
+          }
+        }
+        if (!instance.profile_uuid) {
+          instance.profile_uuid = generateProfileUuid();
+        }
+      }
       if (instance.metadata) {
         const str = typeof instance.metadata === 'string' 
           ? instance.metadata 
@@ -60,6 +89,9 @@ Player.init({
       }
     },
     beforeUpdate: (instance: Player) => {
+      if (instance.changed('profile_uuid')) {
+        instance.setDataValue('profile_uuid', instance.previous('profile_uuid') as any);
+      }
       if (instance.changed('metadata') && instance.metadata) {
         const str = typeof instance.metadata === 'string' 
           ? instance.metadata 
@@ -70,10 +102,30 @@ Player.init({
         }
       }
     },
-    afterFind: (instances: Player | Player[] | null) => {
+    afterFind: async (instances: Player | Player[] | null) => {
       if (!instances) return;
       
-      const decryptInstance = (inst: Player) => {
+      const decryptInstance = async (inst: Player) => {
+        const existingUuid = inst.getDataValue('profile_uuid') as any;
+        const hasValidUuid = typeof existingUuid === 'string' && /^\d{6}$/.test(existingUuid);
+        if (!hasValidUuid) {
+          for (let attempt = 0; attempt < 12; attempt++) {
+            const candidate = generateProfileUuid();
+            const exists = await Player.count({ where: { profile_uuid: candidate } });
+            if (exists) continue;
+            inst.setDataValue('profile_uuid', candidate);
+            try {
+              const where =
+                existingUuid == null
+                  ? ({ id: inst.getDataValue('id') as any, profile_uuid: null } as any)
+                  : ({ id: inst.getDataValue('id') as any, profile_uuid: existingUuid } as any);
+              const [updated] = await Player.update({ profile_uuid: candidate }, { where } as any);
+              if (updated) break;
+            } catch {
+              void 0;
+            }
+          }
+        }
         if (inst.metadata) {
           let strValue = inst.metadata;
           
@@ -137,9 +189,9 @@ Player.init({
       };
 
       if (Array.isArray(instances)) {
-        instances.forEach(decryptInstance);
+        await Promise.all(instances.map(decryptInstance));
       } else {
-        decryptInstance(instances);
+        await decryptInstance(instances);
       }
     }
   }

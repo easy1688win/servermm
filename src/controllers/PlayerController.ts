@@ -736,6 +736,7 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       return {
         id: json.id,
         player_game_id: json.player_game_id,
+        profile_uuid: (json as any).profile_uuid || null,
         tags,
         metadata,
         netProfit,
