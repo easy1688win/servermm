@@ -135,6 +135,26 @@ export class JokerProvider {
     this.config = config;
   }
 
+  private normalizeHistoryUrl(raw: string): string {
+    const s = String(raw || '').trim();
+    if (!s) return s;
+    if (s.startsWith('http://') || s.startsWith('https://')) return s;
+
+    const origin = new URL(this.config.apiUrl).origin;
+
+    if (s.startsWith('//')) {
+      const after = s.slice(2);
+      const beforeSlashOrQ = after.split('/')[0].split('?')[0];
+      const looksLikeHost = beforeSlashOrQ.includes('.') || beforeSlashOrQ.includes(':') || beforeSlashOrQ === 'localhost';
+      if (looksLikeHost) return `https:${s}`;
+      const asPath = `/${after}`;
+      return new URL(asPath, origin).toString();
+    }
+
+    if (s.startsWith('/')) return new URL(s, origin).toString();
+    return new URL(`/${s}`, origin).toString();
+  }
+
   /**
    * Generate HMAC-SHA1 signature
    * Spec (v3.0.1):
@@ -481,7 +501,11 @@ export class JokerProvider {
       body.Language = options.language;
     }
 
-    return this.request('History', body);
+    const resp = (await this.request('History', body)) as any;
+    if (resp?.success && resp?.data && typeof resp.data.Url === 'string') {
+      resp.data.Url = this.normalizeHistoryUrl(resp.data.Url);
+    }
+    return resp;
   }
 
   // ==================== Jackpot APIs (Optional) ====================

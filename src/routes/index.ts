@@ -99,50 +99,6 @@ router.get(
 		const canViewSensitive = permissions.includes('view:sensitive_logs');
 		const canViewUsers = permissions.includes('action:user_view');
 
-		const normalizeAction = (action: string) => String(action || '').trim().toUpperCase();
-		const shouldIncludeSafeDetails = (action: string) => normalizeAction(action).startsWith('REPORT_');
-		const sanitizeAuditData = (value: any, depth = 0): any => {
-			if (value == null) return value;
-			if (depth > 6) return null;
-			if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
-			if (Array.isArray(value)) {
-				return value.slice(0, 20).map((v) => sanitizeAuditData(v, depth + 1));
-			}
-			if (typeof value !== 'object') return null;
-
-			const out: any = {};
-			for (const [k, v] of Object.entries(value)) {
-				const key = String(k);
-				const lower = key.toLowerCase();
-				if (
-					lower.includes('secret') ||
-					lower.includes('password') ||
-					lower.includes('token') ||
-					lower === 'vendorraw' ||
-					lower === 'raw' ||
-					lower === 'sampletx'
-				) {
-					continue;
-				}
-				if (lower === 'vendorsamples' && Array.isArray(v)) {
-					out[key] = (v as any[]).slice(0, 5).map((s) => {
-						const safe: any = {};
-						if (s && typeof s === 'object') {
-							for (const [sk, sv] of Object.entries(s)) {
-								const sl = String(sk).toLowerCase();
-								if (sl === 'vendorraw' || sl === 'sampletx' || sl === 'raw') continue;
-								safe[sk] = sanitizeAuditData(sv, depth + 1);
-							}
-						}
-						return safe;
-					});
-					continue;
-				}
-				out[key] = sanitizeAuditData(v, depth + 1);
-			}
-			return out;
-		};
-
 		if (!canViewAll && user) {
 			where.userId = user.id;
 		}
@@ -167,14 +123,12 @@ router.get(
 			}) : Promise.resolve([])
 		]);
 
-		const payload = logs.map((log: any) => {
-			const includeSafe = !canViewSensitive && shouldIncludeSafeDetails(log.action);
-			return ({
+		const payload = logs.map((log: any) => ({
 			id: log.id,
 			userId: log.userId ?? null,
 			action: log.action,
-			original_data: canViewSensitive ? log.original_data : includeSafe ? sanitizeAuditData(log.original_data) : null,
-			new_data: canViewSensitive ? log.new_data : includeSafe ? sanitizeAuditData(log.new_data) : null,
+			original_data: canViewSensitive ? log.original_data : null,
+			new_data: canViewSensitive ? log.new_data : null,
 			ip_address: canViewSensitive ? (log.ip_address ?? null) : null,
 			created_at: log.created_at,
 			User: log.User
@@ -194,8 +148,7 @@ router.get(
 						})(),
 				  }
 				: null,
-		});
-		});
+		}));
 
 		let operatorOptions: any[] = [];
 		if (canViewUsers) {
