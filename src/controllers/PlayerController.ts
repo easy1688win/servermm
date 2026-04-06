@@ -93,8 +93,8 @@ const randomAlnumUpper = (length: number): string => {
 };
 
 const generateConflictAccountId = (base: string): string => {
-  const len = 2 + (randomBytes(1)[0] % 4);
-  return `${base}R${randomAlnumUpper(len)}`;
+  const digit = String(randomBytes(1)[0] % 10);
+  return `${base}${digit}`;
 };
 
 const validateMetadata = (metadata: any): string | null => {
@@ -1234,7 +1234,7 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
     let result: any = null;
     let created = false;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 10; attempt++) {
       const candidate =
         attempt === 0 ? finalAccountId : (() => {
           let next = generateConflictAccountId(baseAccountId);
@@ -1458,7 +1458,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
       let result: any = null;
       let created = false;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 10; attempt++) {
         const candidate =
           attempt === 0 ? finalAccountId : (() => {
             let next = generateConflictAccountId(baseAccountId);
@@ -1841,7 +1841,7 @@ export const createPlayer = async (req: AuthRequest, res: Response): Promise<voi
         if (!finalAccountId) finalAccountId = baseAccountId;
         let result: any = null;
         let created = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 10; attempt++) {
           const candidate =
             attempt === 0 ? finalAccountId : (() => {
               let next = generateConflictAccountId(baseAccountId);
