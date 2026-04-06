@@ -1829,7 +1829,7 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         const tenancy = getTenancyScopeOrThrow(req);
         const { id } = req.params;
         const transaction = await Transaction.findOne({
-          where: withTenancyWhere(tenancy, { id: Number(id) } as any),
+          where: withTenancyWhere(tenancy, { id: String(id) } as any),
           transaction: t,
           lock: t.LOCK.UPDATE,
         } as any);
@@ -2059,4 +2059,409 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         }
         sendError(res, 'Code2', 500);
     }
+};
+
+export const failTransaction = async (req: AuthRequest, res: Response) => {
+  const t = await sequelize.transaction();
+  try {
+    const clientIp = getClientIp(req);
+    const tenancy = getTenancyScopeOrThrow(req);
+    const id = String(req.params.id);
+
+    const remarkRaw = (req.body?.remark ?? req.body?.staff_note ?? null) as string | null;
+    const remarkInput = typeof remarkRaw === 'string' ? remarkRaw.trim() : '';
+    if (!remarkInput) {
+      await t.rollback();
+      sendError(res, 'Code9004', 400, { detail: 'transaction_fail_remark_required' });
+      return;
+    }
+
+    const transaction = await Transaction.findOne({
+      where: withTenancyWhere(tenancy, { id } as any),
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    } as any);
+
+    if (!transaction) {
+      await t.rollback();
+      sendError(res, 'Code9004', 404, { detail: 'transaction_not_found' });
+      return;
+    }
+
+    if (transaction.status === 'VOIDED' || transaction.status === 'REJECTED') {
+      await t.rollback();
+      sendError(res, 'Code9004', 400, { detail: 'transaction_already_closed' });
+      return;
+    }
+
+    if (transaction.status !== 'COMPLETED') {
+      await t.rollback();
+      sendError(res, 'Code9004', 400, { detail: 'transaction_fail_invalid_status' });
+      return;
+    }
+
+    const bankAccountId = transaction.bank_account_id as number | null;
+    const bankAccount =
+      transaction.type === 'WALVE' || bankAccountId == null
+        ? null
+        : await BankAccount.findOne({
+            where: withTenancyWhere(tenancy, { id: bankAccountId } as any),
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+          } as any);
+    if (transaction.type !== 'WALVE' && !bankAccount) throw new Error('Bank Account not found');
+
+    const player = transaction.player_id
+      ? await Player.findOne({ where: withTenancyWhere(tenancy, { id: transaction.player_id } as any), transaction: t } as any)
+      : null;
+
+    let game: any | null = null;
+    const effectiveGameId = (transaction as any).game_id || null;
+    if (effectiveGameId) {
+      game = await Game.findOne({
+        where: withTenancyWhere(tenancy, { id: effectiveGameId } as any),
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      } as any);
+    }
+
+    const amount = Number(transaction.amount);
+    const bonus = Number((transaction as any).bonus || 0);
+    const walve = Number((transaction as any).walve || 0);
+    const tips = Number((transaction as any).tips || 0);
+
+    const reservedBankMap = await getPendingReservedWithdrawalByBank(tenancy, t);
+    const reservedGameMap = await getPendingReservedDepositByGame(tenancy, t);
+    const fmt = (n: number) => `$${Number(n).toFixed(2)}`;
+    const insufficientFundsDetail = (available: number) => `Insufficient Funds ${fmt(available)}`;
+    const balanceError = (code: 'T903' | 'T904', available: number) => {
+      throw new Error(`BALANCE_ERR:${code}:${insufficientFundsDetail(available)}`);
+    };
+
+    const vendorUsernameRaw = (transaction as any).game_account_id;
+    const vendorUsername = typeof vendorUsernameRaw === 'string' ? vendorUsernameRaw.trim() : '';
+    const gameUseApi = Boolean((game as any)?.use_api);
+    const canRollbackVendor = gameUseApi && !!game && vendorUsername.length > 0;
+
+    const remarkPrefix = `${id}ROLLBACK - `;
+    (transaction as any).remark = remarkInput.startsWith(remarkPrefix) ? remarkInput : `${remarkPrefix}${remarkInput}`;
+
+    if (transaction.type === 'DEPOSIT') {
+      if (bankAccount) {
+        const reservedBank = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+        const currentTotal = Number((bankAccount as any).total_balance);
+        const nextTotal = currentTotal - amount;
+        if (nextTotal < reservedBank) balanceError('T903', currentTotal - reservedBank);
+        (bankAccount as any).total_balance = nextTotal;
+      }
+
+      if (game) {
+        const beforeGame = Number(game.balance);
+        game.balance = beforeGame + (amount + bonus);
+        await game.save({ transaction: t });
+      }
+    } else if (transaction.type === 'WITHDRAWAL') {
+      if (bankAccount) {
+        (bankAccount as any).total_balance = Number((bankAccount as any).total_balance) + amount;
+      }
+
+      if (game) {
+        const beforeGame = Number(game.balance);
+        game.balance = beforeGame - (amount + walve + tips);
+        const reservedGame = Number(reservedGameMap[(game as any).id] ?? 0);
+        const next = Number(game.balance);
+        if (next < reservedGame) balanceError('T904', beforeGame - reservedGame);
+        await game.save({ transaction: t });
+      }
+    } else if (transaction.type === 'ADJUSTMENT') {
+      if (bankAccount) {
+        const reservedBank = Number(reservedBankMap[(bankAccount as any).id] ?? 0);
+        const currentTotal = Number((bankAccount as any).total_balance);
+        const nextTotal = currentTotal - amount;
+        if (nextTotal < reservedBank) balanceError('T903', currentTotal - reservedBank);
+        (bankAccount as any).total_balance = nextTotal;
+      }
+    } else if (transaction.type === 'WALVE') {
+      if (game) {
+        const beforeGame = Number(game.balance);
+        game.balance = beforeGame - walve;
+        const reservedGame = Number(reservedGameMap[(game as any).id] ?? 0);
+        const next = Number(game.balance);
+        if (next < reservedGame) balanceError('T904', beforeGame - reservedGame);
+        await game.save({ transaction: t });
+      }
+    }
+
+    if (gameUseApi) {
+      if (!canRollbackVendor) {
+        await t.rollback();
+        sendError(res, 'Code9004', 400, { detail: !vendorUsername ? 'transaction_fail_missing_game_account' : 'transaction_fail_vendor_not_supported' });
+        return;
+      }
+
+      const vendor = await VendorFactory.getServiceByGame(Number((game as any).id));
+      if (!vendor) {
+        await t.rollback();
+        sendError(res, 'Code9004', 400, { detail: 'transaction_fail_vendor_not_supported' });
+        return;
+      }
+
+      const amounts = getTransactionAmounts({
+        type: transaction.type as any,
+        amount: transaction.type === 'WALVE' ? 0 : amount,
+        bonus: transaction.type === 'DEPOSIT' ? bonus : 0,
+        walve: transaction.type === 'WITHDRAWAL' || transaction.type === 'WALVE' ? walve : 0,
+        tips: transaction.type === 'WITHDRAWAL' ? tips : 0,
+      });
+      const vendorTransfer = Number(amounts.vendorTransfer || 0);
+      const rollbackRequestId = `${id}-FAIL`;
+
+      const verifyIfSupported = async () => {
+        if (!vendor.verifyTransfer) return false;
+        const delaysMs = [0, 1500, 4000];
+        for (let i = 0; i < delaysMs.length; i++) {
+          const delay = delaysMs[i];
+          if (delay > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+          try {
+            const chk = await vendor.verifyTransfer(rollbackRequestId);
+            if (chk?.success) return true;
+            const errMsg = (chk as any)?.error || (chk as any)?.message;
+            const retry = vendor.shouldVerifyTransferOnError?.(errMsg) ?? false;
+            if (!retry) return false;
+          } catch (e: any) {
+            const errMsg = String(e?.message ?? e ?? '');
+            const retry = vendor.shouldVerifyTransferOnError?.(errMsg) ?? false;
+            if (!retry) return false;
+          }
+        }
+        return false;
+      };
+
+      let vendorOk = false;
+      let vendorMessage: string | undefined;
+      let vendorCreditBefore: number | null = null;
+      let vendorCreditAfter: number | null = null;
+      let needVerify = false;
+
+      try {
+        if (transaction.type === 'DEPOSIT') {
+          const v = await vendor.withdraw(vendorUsername, vendorTransfer, rollbackRequestId);
+          vendorOk = !!v.success;
+          vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
+          if (v.success) {
+            const before = toFiniteNumber((v as any).beforeCredit);
+            const after = toFiniteNumber((v as any).credit);
+            if (before != null) vendorCreditBefore = before;
+            if (after != null) vendorCreditAfter = after;
+          }
+          if (!vendorOk) {
+            needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
+          }
+        } else if (transaction.type === 'WITHDRAWAL' || transaction.type === 'WALVE') {
+          const v = await vendor.deposit(vendorUsername, vendorTransfer, rollbackRequestId);
+          vendorOk = !!v.success;
+          vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
+          if (v.success) {
+            const before = toFiniteNumber((v as any).beforeCredit);
+            const after = toFiniteNumber((v as any).credit);
+            if (before != null) vendorCreditBefore = before;
+            if (after != null) vendorCreditAfter = after;
+          }
+          if (!vendorOk) {
+            needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? false;
+          }
+        } else {
+          vendorOk = true;
+        }
+      } catch (e: any) {
+        vendorOk = false;
+        vendorMessage = String(e?.message ?? e ?? '');
+        needVerify = vendor.shouldVerifyTransferOnError?.(vendorMessage) ?? true;
+      }
+
+      if (!vendorOk && needVerify) {
+        vendorOk = await verifyIfSupported();
+        if (vendorOk && !vendorMessage) vendorMessage = 'VERIFIED';
+      }
+
+      if (!vendorOk) {
+        await t.rollback();
+        const msg = String(vendorMessage || '').trim();
+        const lower = msg.toLowerCase();
+        const detailKey =
+          lower.includes('insufficient credit') || lower.includes('insufficient') || lower.includes('not enough')
+            ? 'transaction_fail_vendor_insufficient_credit'
+            : 'transaction_fail_vendor_rollback_failed';
+        sendError(
+          res,
+          'Code9004',
+          400,
+          { detail: detailKey },
+          { message: msg || 'Unknown', requestId: rollbackRequestId },
+        );
+        return;
+      }
+
+      const existingVendorMessage =
+        typeof (transaction as any).vendor_message === 'string' && String((transaction as any).vendor_message).trim().length > 0
+          ? String((transaction as any).vendor_message).trim()
+          : null;
+      const nextVendorMessage = `${existingVendorMessage ? `${existingVendorMessage} | ` : ''}FAIL_ROLLBACK:${vendorMessage || 'OK'}`;
+      (transaction as any).vendor_message = nextVendorMessage;
+      if (vendorCreditBefore != null) (transaction as any).vendor_credit_before = vendorCreditBefore;
+      if (vendorCreditAfter != null) (transaction as any).vendor_credit_after = vendorCreditAfter;
+
+      if (player && vendorCreditAfter != null && Number.isFinite(vendorCreditAfter) && game) {
+        try {
+          const normalizeMeta = (raw: any) => {
+            if (!raw) return {};
+            if (typeof raw === 'object') return raw;
+            if (typeof raw !== 'string') return {};
+            let s = raw.trim();
+            if (!s) return {};
+            if (s.startsWith('"') && s.endsWith('"')) {
+              try {
+                const parsed = JSON.parse(s);
+                if (typeof parsed === 'string') s = parsed;
+              } catch {
+              }
+            }
+            if (isEncrypted(s)) {
+              try {
+                s = decrypt(s);
+              } catch {
+              }
+            }
+            try {
+              const obj = JSON.parse(s);
+              return obj && typeof obj === 'object' ? obj : {};
+            } catch {
+              return {};
+            }
+          };
+
+          const meta: any = normalizeMeta((player as any).metadata);
+          const accounts: any[] = Array.isArray(meta.gameAccounts) ? meta.gameAccounts : [];
+          if (accounts.length > 0) {
+            const gameName = String((game as any).name || '').trim();
+            const normalizedGameName = gameName.toLowerCase();
+            const normalizedVendorUsername = vendorUsername.trim().toLowerCase();
+
+            const nextAccounts = accounts.map((ga: any) => {
+              if (!ga || typeof ga !== 'object') return ga;
+              const gaGameName = String(ga?.gameName || '').trim().toLowerCase();
+              if (!gaGameName || gaGameName !== normalizedGameName) return ga;
+              const gaAccountId = String(ga?.accountId || '').trim().toLowerCase();
+              if (!gaAccountId || gaAccountId !== normalizedVendorUsername) return ga;
+              const prev = (ga as any).walletCredit;
+              const prevNum = prev != null ? Number(prev) : NaN;
+              if (Number.isFinite(prevNum) && prevNum === vendorCreditAfter) return ga;
+              return { ...ga, walletCredit: vendorCreditAfter };
+            });
+
+            (player as any).metadata = { ...meta, gameAccounts: nextAccounts };
+            await (player as any).save({ transaction: t });
+          }
+        } catch {
+        }
+      }
+    }
+
+    if (player) {
+      const statsDateSource = (transaction as any).created_at || (transaction as any).createdAt;
+      const statsDate = statsDateSource instanceof Date ? statsDateSource : new Date(statsDateSource);
+      const statsDateOnly = statsDate.toISOString().slice(0, 10);
+
+      const isDeposit = transaction.type === 'DEPOSIT';
+      const isWithdrawal = transaction.type === 'WITHDRAWAL';
+      const isWalve = transaction.type === 'WALVE';
+
+      let stats = await PlayerStats.findOne({
+        where: withTenancyWhere(tenancy, { player_id: transaction.player_id, date: statsDateOnly } as any),
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      } as any);
+
+      if (!stats) {
+        stats = await PlayerStats.create(withTenancyCreate(tenancy, { player_id: transaction.player_id, date: statsDateOnly }), { transaction: t });
+      }
+
+      const currentTotalDeposit = Number((stats as any).total_deposit || 0);
+      const currentTotalWithdraw = Number((stats as any).total_withdraw || 0);
+      const currentTotalWalve = Number((stats as any).total_walve || 0);
+      const currentTotalTips = Number((stats as any).total_tips || 0);
+      const currentTotalBonus = Number((stats as any).total_bonus || 0);
+
+      if (isDeposit) {
+        const count = Number((stats as any).deposit_count || 0) - 1;
+        (stats as any).deposit_count = count < 0 ? 0 : count;
+        (stats as any).total_deposit = currentTotalDeposit - amount;
+      }
+
+      if (isWithdrawal) {
+        const count = Number((stats as any).withdraw_count || 0) - 1;
+        (stats as any).withdraw_count = count < 0 ? 0 : count;
+        (stats as any).total_withdraw = currentTotalWithdraw - amount;
+      }
+
+      const walvePart = isWithdrawal || isWalve ? walve : 0;
+      const tipsPart = isWithdrawal ? tips : 0;
+      const bonusPart = isDeposit ? bonus : 0;
+
+      if (walvePart) {
+        (stats as any).total_walve = currentTotalWalve - walvePart;
+      }
+      if (tipsPart) {
+        (stats as any).total_tips = currentTotalTips - tipsPart;
+      }
+      if (bonusPart) {
+        (stats as any).total_bonus = currentTotalBonus - bonusPart;
+      }
+
+      await stats.save({ transaction: t });
+    }
+
+    if (bankAccount) {
+      await bankAccount.save({ transaction: t });
+    }
+
+    const original = transaction.toJSON();
+    transaction.status = 'REJECTED';
+    await transaction.save({ transaction: t });
+
+    await t.commit();
+
+    const typeSuffix =
+      (transaction as any)?.type === 'DEPOSIT'
+        ? 'DEPOSIT'
+        : (transaction as any)?.type === 'WITHDRAWAL'
+          ? 'WITHDRAWAL'
+          : (transaction as any)?.type === 'WALVE'
+            ? 'WALVE'
+            : 'UNKNOWN';
+
+    await logAudit(req.user?.id, `TRANSACTION_FAIL_${typeSuffix}`, original, transaction.toJSON(), clientIp || undefined);
+    sendSuccess(res, 'Code1', transaction.toJSON());
+  } catch (error: any) {
+    if (!(t as any).finished) await t.rollback();
+    const msg = String(error?.message ?? '');
+    if (msg.startsWith('BALANCE_ERR:')) {
+      const parts = msg.split(':');
+      const code = (parts[1] || 'T900') as string;
+      const detail = parts.slice(2).join(':') || 'Invalid balance';
+      if (code === 'T903') {
+        sendError(res, 'Code309', 400, { detail });
+        return;
+      }
+      if (code === 'T904') {
+        sendError(res, 'Code310', 400, { detail });
+        return;
+      }
+      sendError(res, 'Code308', 400, { detail });
+      return;
+    }
+    sendError(res, 'Code2', 500);
+  }
 };

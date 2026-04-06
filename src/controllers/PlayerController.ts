@@ -530,14 +530,14 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     if (pagedPlayerIds.length > 0) {
       try {
         const rows = await Transaction.findAll({
-          attributes: ['player_id', 'game_id', 'vendor_credit_after', 'createdAt'],
+          attributes: ['player_id', 'game_id', 'vendor_credit_after', 'updatedAt', 'createdAt'],
           where: withTenancyWhere(scope, {
             player_id: { [Op.in]: pagedPlayerIds },
-            status: 'COMPLETED',
+            status: { [Op.in]: ['COMPLETED', 'REJECTED'] },
             vendor_credit_after: { [Op.ne]: null },
             game_id: { [Op.ne]: null },
           } as any),
-          order: [['createdAt', 'DESC']],
+          order: [['updatedAt', 'DESC'], ['createdAt', 'DESC']],
           limit: 5000,
         } as any);
 
@@ -683,14 +683,15 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
 
         const nextGameAccounts = gameAccountsRaw.map((ga: any) => {
           if (!ga || typeof ga !== 'object') return ga;
-          const walletCredit = ga.walletCredit;
-          if (walletCredit != null && Number.isFinite(Number(walletCredit))) return ga;
           const name = typeof ga.gameName === 'string' ? ga.gameName.trim().toLowerCase() : '';
           const gid = name ? (gameIdByName.get(name) ?? null) : null;
           if (!gid) return ga;
           const key = `${json.id}:${gid}`;
           const val = latestVendorCreditAfter.get(key);
           if (val == null) return ga;
+          const walletCredit = (ga as any).walletCredit;
+          const current = walletCredit != null ? Number(walletCredit) : NaN;
+          if (Number.isFinite(current) && current === val) return ga;
           return { ...ga, walletCredit: val };
         });
 
@@ -1370,9 +1371,14 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
     const existingAccounts: any[] = Array.isArray(existingMeta.gameAccounts) ? existingMeta.gameAccounts : [];
 
     const normalizeGameName = (s: any) => String(s || '').trim().toLowerCase();
-    const existingGameNames = new Set<string>(
-      existingAccounts.map((ga) => normalizeGameName(ga?.gameName)).filter(Boolean),
-    );
+    const existingGameNames = new Set<string>(existingAccounts.map((ga) => normalizeGameName(ga?.gameName)).filter(Boolean));
+    const existingHasAccountId = new Set<string>();
+    for (const ga of existingAccounts) {
+      const key = normalizeGameName(ga?.gameName);
+      if (!key) continue;
+      const acc = typeof ga?.accountId === 'string' ? ga.accountId.trim() : '';
+      if (acc) existingHasAccountId.add(key);
+    }
 
     const [activeApiGames, activeNonApiGames] = await Promise.all([
       Game.findAll({
@@ -1411,7 +1417,7 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
       const key = normalizeGameName(gameName);
       if (!key) return;
 
-      if (existingGameNames.has(key)) {
+      if (existingGameNames.has(key) && (!useApi || existingHasAccountId.has(key))) {
         results.push({ gameName, use_api: useApi, action: 'SKIP_EXISTS' });
         return;
       }
@@ -1506,8 +1512,13 @@ export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) =>
         (result as any)?.raw?.data?.Data?.Username ||
         (result as any)?.raw?.data?.Username ||
         finalAccountId;
-      const pwdResult = await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD);
-      const password = pwdResult.success ? FIXED_PASSWORD : undefined;
+      const createdNow =
+        (result as any)?.status === 'Created' ||
+        (result as any)?.code === 'CREATED' ||
+        (result as any)?.raw?.data?.Status === 'Created' ||
+        (result as any)?.raw?.data?.Data?.Status === 'Created';
+      const pwdResult = createdNow ? await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD) : { success: false } as any;
+      const password = createdNow && pwdResult.success ? FIXED_PASSWORD : undefined;
 
       newAccounts.push({
         gameName,

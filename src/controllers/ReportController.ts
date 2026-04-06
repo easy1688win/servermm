@@ -6,6 +6,7 @@ import { Game, Player, Product, Transaction } from '../models';
 import { VendorFactory } from '../services/vendor/VendorFactory';
 import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 import { sendError, sendSuccess } from '../utils/response';
+import { getClientIp, logAudit } from '../services/AuditService';
 
 let reportTransactionsSynced = false;
 const ensureReportTransactionsSynced = async () => {
@@ -269,7 +270,7 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       const totalDeposit = toFiniteNumber(r?.total_deposit);
       const bonusClaimed = toFiniteNumber(r?.bonus_claimed);
       const totalWithdrawal = toFiniteNumber(r?.total_withdrawal);
-      const totalWinLoss = totalDeposit + bonusClaimed - totalWithdrawal;
+      const totalWinLoss = totalDeposit - totalWithdrawal;
       return {
         player_id: playerId,
         player_game_id: player?.player_game_id ?? null,
@@ -291,7 +292,7 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       total_deposit: totalsTotalDeposit,
       withdraw_count: Number(totalsRow?.withdraw_count ?? 0) || 0,
       total_withdrawal: totalsTotalWithdrawal,
-      total_winloss: totalsTotalDeposit + totalsBonusClaimed - totalsTotalWithdrawal,
+      total_winloss: totalsTotalDeposit - totalsTotalWithdrawal,
       bonus_claimed: totalsBonusClaimed,
       turnover: 0 as number,
     };
@@ -414,6 +415,56 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
     };
     const rows: any[] = [];
     let hasMore = false;
+    const vendorSummary = new Map<
+      string,
+      {
+        calls: number;
+        errors: number;
+        httpStatus: number | null;
+        status: string | null;
+        message: string | null;
+      }
+    >();
+
+    const updateVendorSummary = (providerLabel: string, resp: any) => {
+      const prev = vendorSummary.get(providerLabel) || {
+        calls: 0,
+        errors: 0,
+        httpStatus: null as number | null,
+        status: null as string | null,
+        message: null as string | null,
+      };
+
+      const raw = resp?.raw && typeof resp.raw === 'object' ? resp.raw : null;
+      const httpStatus =
+        raw && raw.httpStatus != null && Number.isFinite(Number(raw.httpStatus)) ? Number(raw.httpStatus) : null;
+      const status =
+        raw && raw.data && typeof raw.data === 'object'
+          ? typeof (raw.data as any).Status === 'string'
+            ? String((raw.data as any).Status)
+            : typeof (raw.data as any).status === 'string'
+              ? String((raw.data as any).status)
+              : null
+          : null;
+      const message =
+        typeof raw?.message === 'string' && raw.message.trim().length > 0
+          ? raw.message.trim()
+          : typeof raw?.error === 'string' && raw.error.trim().length > 0
+            ? raw.error.trim()
+            : typeof resp?.message === 'string' && resp.message.trim().length > 0
+              ? resp.message.trim()
+              : typeof resp?.error === 'string' && resp.error.trim().length > 0
+                ? resp.error.trim()
+                : null;
+
+      vendorSummary.set(providerLabel, {
+        calls: prev.calls + 1,
+        errors: prev.errors + (resp?.success ? 0 : 1),
+        httpStatus: httpStatus ?? prev.httpStatus,
+        status: status ?? prev.status,
+        message: message ?? prev.message,
+      });
+    };
 
     const serviceEntries: Array<{ gameId: number; providerLabel: string; service: any }> = [];
     if (normalizedGameId) {
@@ -495,58 +546,74 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
             break;
           }
           const resp = await (entry.service as any).getTransactionsByMinute(startStr, endStr, { nextId });
-        if (!resp?.success) {
-          sendError(res, 'Code9000', 500, { detail: resp?.error || resp?.message || 'Failed to get vendor transactions' });
-          return;
-        }
+          updateVendorSummary(entry.providerLabel, resp);
+          if (!resp?.success) {
+            await logAudit(
+              req.user?.id ?? null,
+              'GAME_LOG_QUERY_RESULT',
+              null,
+              {
+                username: uname || null,
+                rows: 0,
+                hasMore: true,
+                apiCalls,
+                vendors: Array.from(vendorSummary.entries()).map(([provider, v]) => ({ provider, ...v })),
+                error: resp?.error || resp?.message || 'Failed to get vendor transactions',
+              },
+              getClientIp(req),
+              { tenant_id: (scope as any)?.tenant_id ?? null, sub_brand_id: (scope as any)?.sub_brand_id ?? null },
+            );
+            sendError(res, 'Code9000', 500, { detail: resp?.error || resp?.message || 'Failed to get vendor transactions' });
+            return;
+          }
 
-        const gamesArr = Array.isArray(resp?.games) ? resp.games : [];
-        for (const g of gamesArr) {
-          const code = String(g?.GameCode ?? '').trim();
-          if (!code) continue;
-          const name = String(g?.GameName ?? '').trim();
-          const type = String(g?.GameType ?? '').trim();
-          gameInfoByCode.set(code, { name, type });
-        }
+          const gamesArr = Array.isArray(resp?.games) ? resp.games : [];
+          for (const g of gamesArr) {
+            const code = String(g?.GameCode ?? '').trim();
+            if (!code) continue;
+            const name = String(g?.GameName ?? '').trim();
+            const type = String(g?.GameType ?? '').trim();
+            gameInfoByCode.set(code, { name, type });
+          }
 
-        const data = resp?.data && typeof resp.data === 'object' ? resp.data : {};
-        for (const key of Object.keys(data)) {
-          const arr = (data as any)[key];
-          if (!Array.isArray(arr)) continue;
-          for (const tx of arr) {
-            const txUsername = String(tx?.Username ?? '').trim();
-            if (!txUsername) continue;
-            if (uname && txUsername !== uname) continue;
-            const ocode = String(tx?.OCode ?? '').trim();
-            const txKey = ocode ? `${entry.gameId}:${ocode}` : '';
-            if (txKey && seen.has(txKey)) continue;
-            const gameCode = String(tx?.GameCode ?? '').trim();
-            const info = gameInfoByCode.get(gameCode);
-            const bet = toFiniteNumber(tx?.Amount);
-            const resultAmount = toFiniteNumber(tx?.Result);
-            rows.push({
-              player: txUsername,
-              start_time: toDisplayDateTimeFromIso(tx?.Time),
-              end_time: toDisplayDateTimeFromIso(tx?.Time),
-              game_id: entry.gameId,
-              ocode: ocode || null,
-              game_provider: entry.providerLabel,
-              game_name: info?.name || null,
-              game_category: info?.type || null,
-              start_balance: toFiniteNumber(tx?.StartBalance),
-              end_balance: toFiniteNumber(tx?.EndBalance),
-              bet,
-              win_lose: resultAmount - bet,
-            });
-            if (txKey) seen.add(txKey);
-            if (rows.length >= maxRows) {
-              hasMore = true;
-              break;
+          const data = resp?.data && typeof resp.data === 'object' ? resp.data : {};
+          for (const key of Object.keys(data)) {
+            const arr = (data as any)[key];
+            if (!Array.isArray(arr)) continue;
+            for (const tx of arr) {
+              const txUsername = String(tx?.Username ?? '').trim();
+              if (!txUsername) continue;
+              if (uname && txUsername !== uname) continue;
+              const ocode = String(tx?.OCode ?? '').trim();
+              const txKey = ocode ? `${entry.gameId}:${ocode}` : '';
+              if (txKey && seen.has(txKey)) continue;
+              const gameCode = String(tx?.GameCode ?? '').trim();
+              const info = gameInfoByCode.get(gameCode);
+              const bet = toFiniteNumber(tx?.Amount);
+              const resultAmount = toFiniteNumber(tx?.Result);
+              rows.push({
+                player: txUsername,
+                start_time: toDisplayDateTimeFromIso(tx?.Time),
+                end_time: toDisplayDateTimeFromIso(tx?.Time),
+                game_id: entry.gameId,
+                ocode: ocode || null,
+                game_provider: entry.providerLabel,
+                game_name: info?.name || null,
+                game_category: info?.type || null,
+                start_balance: toFiniteNumber(tx?.StartBalance),
+                end_balance: toFiniteNumber(tx?.EndBalance),
+                bet,
+                win_lose: resultAmount - bet,
+              });
+              if (txKey) seen.add(txKey);
+              if (rows.length >= maxRows) {
+                hasMore = true;
+                break;
+              }
             }
+            if (rows.length >= maxRows) break;
           }
           if (rows.length >= maxRows) break;
-        }
-        if (rows.length >= maxRows) break;
 
           const nextRaw = resp?.nextId;
           nextId = nextRaw ? String(nextRaw) : '';
@@ -560,7 +627,23 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
             hasMore = true;
           } else {
             const resp = await (entry.service as any).getTransactionsByMinute(startStr, endStr, { nextId: lastRequestNextId });
+            updateVendorSummary(entry.providerLabel, resp);
             if (!resp?.success) {
+              await logAudit(
+                req.user?.id ?? null,
+                'GAME_LOG_QUERY_RESULT',
+                null,
+                {
+                  username: uname || null,
+                  rows: 0,
+                  hasMore: true,
+                  apiCalls,
+                  vendors: Array.from(vendorSummary.entries()).map(([provider, v]) => ({ provider, ...v })),
+                  error: resp?.error || resp?.message || 'Failed to get vendor transactions',
+                },
+                getClientIp(req),
+                { tenant_id: (scope as any)?.tenant_id ?? null, sub_brand_id: (scope as any)?.sub_brand_id ?? null },
+              );
               sendError(res, 'Code9000', 500, { detail: resp?.error || resp?.message || 'Failed to get vendor transactions' });
               return;
             }
@@ -632,6 +715,21 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
 
     filteredRows.sort((a, b) => String(b?.start_time ?? '').localeCompare(String(a?.start_time ?? '')));
 
+    await logAudit(
+      req.user?.id ?? null,
+      'GAME_LOG_QUERY_RESULT',
+      null,
+      {
+        username: uname || null,
+        rows: filteredRows.length,
+        hasMore,
+        apiCalls,
+        vendors: Array.from(vendorSummary.entries()).map(([provider, v]) => ({ provider, ...v })),
+      },
+      getClientIp(req),
+      { tenant_id: (scope as any)?.tenant_id ?? null, sub_brand_id: (scope as any)?.sub_brand_id ?? null },
+    );
+
     sendSuccess(res, 'Code1', {
       username: uname || null,
       rows: filteredRows,
@@ -661,6 +759,20 @@ export const getPlayerGameLogHistoryUrl = async (req: AuthRequest, res: Response
     }
 
     const lang = typeof language === 'string' && language.trim().length > 0 ? language.trim() : 'en';
+
+    await logAudit(
+      req.user?.id ?? null,
+      'GAME_LOG_HISTORY_URL',
+      null,
+      {
+        gameId: normalizedGameId,
+        ocode: o,
+        language: lang,
+      },
+      getClientIp(req),
+      { tenant_id: (scope as any)?.tenant_id ?? null, sub_brand_id: (scope as any)?.sub_brand_id ?? null },
+    );
+
     const resp = await (svc as any).getHistoryUrl(o, lang);
     if (!resp?.success) {
       sendError(res, 'Code9000', 500, { detail: resp?.error || resp?.message || 'Failed to get history url' });
