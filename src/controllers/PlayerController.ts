@@ -296,14 +296,6 @@ export const getPlayers = async (req: AuthRequest, res: Response) => {
     const userPermissions = req.user?.permissions || [];
     const sanitizedPlayers = players.map((player: any) => sanitizePlayerForResponse(player, userPermissions));
 
-    await logAudit(
-      req.user?.id ?? null,
-      'PLAYER_LIST',
-      null,
-      { count: sanitizedPlayers.length },
-      getClientIp(req) || null
-    );
-
     sendSuccess(res, 'Code1', sanitizedPlayers);
   } catch (error) {
     sendError(res, 'Code800', 500);
@@ -826,21 +818,6 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       : [];
 
     const pagedPlayers = playersPayload;
-
-    await logAudit(
-      req.user?.id ?? null,
-      'PLAYER_LIST_VIEW',
-      null,
-      {
-        count: totalItems,
-        startDate: startDateRaw,
-        endDate: endDateRaw,
-        page,
-        pageSize,
-        q: searchQuery,
-      },
-      getClientIp(req) || null
-    );
 
     let subBrandOptions: any[] = [];
     try {

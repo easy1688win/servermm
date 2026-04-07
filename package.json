@@ -8,7 +8,7 @@
     "build": "npm version patch --no-git-tag-version --force && tsc",
     "build:ci": "tsc",
     "start": "node dist/server.js",
-    "db:fix": "ts-node src/scripts/checkDb.ts",
+    "db:fix": "ts-node src/scripts/syncDb.ts",
     "db:install": "ts-node src/scripts/initDb.ts",
     "db:install:dist": "node dist/scripts/initDb.js",
     "migrate": "npx sequelize-cli db:migrate",
