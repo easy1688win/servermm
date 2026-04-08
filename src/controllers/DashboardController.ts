@@ -219,6 +219,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       const walve = t.walve != null ? Number(t.walve) : 0;
       const isDeposit = t.type === 'DEPOSIT';
       const isWithdrawal = t.type === 'WITHDRAWAL';
+      const isCompleted = t.status === 'COMPLETED';
 
       if (t.playerId != null) {
         activePlayerIds.add(t.playerId);
@@ -230,18 +231,26 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       if (isDeposit || isWithdrawal) {
         stats.totalCount += 1;
       }
+
+      // 统计所有 bonus/walve（不论状态，用于 Funds flow 计算）
       if (isDeposit) {
-        stats.totalDeposits += amount;
-        stats.depositCount += 1;
         stats.totalBonus += bonus;
-      } else if (isWithdrawal) {
-        stats.totalWithdrawals += amount;
-        stats.withdrawalCount += 1;
       } else if (t.type === 'WALVE') {
         stats.totalBonus += walve;
       }
 
-      if (t.bankAccountId != null) {
+      // 只计算成功状态的交易金额
+      if (isCompleted) {
+        if (isDeposit) {
+          stats.totalDeposits += amount;  // 不包含 bonus
+          stats.depositCount += 1;
+        } else if (isWithdrawal) {
+          stats.totalWithdrawals += amount;
+          stats.withdrawalCount += 1;
+        }
+      }
+
+      if (t.bankAccountId != null && isCompleted) {
         const current = bankAgg.get(t.bankAccountId) || {
           depositsAmount: 0,
           depositsCount: 0,
@@ -258,7 +267,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         bankAgg.set(t.bankAccountId, current);
       }
 
-      if (t.gameId != null) {
+      if (t.gameId != null && isCompleted) {
         const current = gameAgg.get(t.gameId) || {
           depositsAmount: 0,
           depositsCount: 0,
@@ -266,13 +275,10 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
           withdrawalsCount: 0,
         };
         if (isDeposit) {
-          current.depositsAmount += amount + bonus;
+          current.depositsAmount += amount;  // 不包含 bonus
           current.depositsCount += 1;
         } else if (isWithdrawal) {
-          current.withdrawalsAmount += amount + walve + tips;
-          current.withdrawalsCount += 1;
-        } else if (t.type === 'WALVE') {
-          current.withdrawalsAmount += walve;
+          current.withdrawalsAmount += amount;
           current.withdrawalsCount += 1;
         }
         gameAgg.set(t.gameId, current);
@@ -287,20 +293,18 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       };
       existing.txCount += 1;
 
-      let volumeDelta = 0;
-      if (isDeposit || isWithdrawal) {
-        volumeDelta = amount;
-      } else if (t.type === 'WALVE') {
-        volumeDelta = walve;
+      // Staff volume 只计算成功状态的存款/取款金额（不包含 bonus）
+      if (isCompleted && (isDeposit || isWithdrawal)) {
+        existing.volume += amount;
       }
 
-      existing.volume += volumeDelta;
       staffMap.set(operatorName, existing);
     });
 
     stats.activePlayersToday = activePlayerIds.size;
     stats.newPlayersWithDeposit = players.filter(p => depositPlayerIds.has(p.id)).length;
-    stats.netCashFlow = stats.totalDeposits - stats.totalWithdrawals;
+    // Funds flow = Total deposits - Total withdrawals - Bonus
+    stats.netCashFlow = stats.totalDeposits - stats.totalWithdrawals - stats.totalBonus;
 
     const bankReports = banks.map((bank: any) => {
       const bankId = bank.id;
