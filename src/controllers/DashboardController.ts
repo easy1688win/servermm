@@ -217,8 +217,9 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       const bonus = t.bonus != null ? Number(t.bonus) : 0;
       const tips = t.tips != null ? Number(t.tips) : 0;
       const walve = t.walve != null ? Number(t.walve) : 0;
-      const isDeposit = t.type === 'DEPOSIT';
-      const isWithdrawal = t.type === 'WITHDRAWAL';
+      const type = String(t.type || '').toUpperCase();
+      const isDeposit = type === 'DEPOSIT';
+      const isWithdrawal = type === 'WITHDRAWAL';
       const isCompleted = t.status === 'COMPLETED';
 
       if (t.playerId != null) {
@@ -235,7 +236,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       // 统计所有 bonus/walve（不论状态，用于 Funds flow 计算）
       if (isDeposit) {
         stats.totalBonus += bonus;
-      } else if (t.type === 'WALVE') {
+      } else if (type === 'WALVE') {
         stats.totalBonus += walve;
       }
 
@@ -275,10 +276,14 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
           withdrawalsCount: 0,
         };
         if (isDeposit) {
-          current.depositsAmount += amount;  // 不包含 bonus
+          current.depositsAmount += amount + bonus;  // 存款包含 bonus
           current.depositsCount += 1;
         } else if (isWithdrawal) {
-          current.withdrawalsAmount += amount;
+          current.withdrawalsAmount += amount + walve + tips;  // 取款包含 walve + tips
+          current.withdrawalsCount += 1;
+        } else if (type === 'WALVE') {
+          // WALVE 单独加到取款金额
+          current.withdrawalsAmount += walve;
           current.withdrawalsCount += 1;
         }
         gameAgg.set(t.gameId, current);
@@ -293,9 +298,15 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       };
       existing.txCount += 1;
 
-      // Staff volume 只计算成功状态的存款/取款金额（不包含 bonus）
-      if (isCompleted && (isDeposit || isWithdrawal)) {
-        existing.volume += amount;
+      // Staff volume 只计算成功状态，跟 Game 报告一样
+      if (isCompleted) {
+        if (isDeposit) {
+          existing.volume += amount + bonus;  // 存款包含 bonus
+        } else if (isWithdrawal) {
+          existing.volume += amount + walve + tips;  // 取款包含 walve + tips
+        } else if (type === 'WALVE') {
+          existing.volume += walve;
+        }
       }
 
       staffMap.set(operatorName, existing);
@@ -366,31 +377,6 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       totalBonus: canViewFinancials ? stats.totalBonus : null,
     };
 
-    const recentTransactions = transactions
-      .slice(0, 5)
-      .map(t => {
-        const bank = (banks as any[]).find(b => b.id === t.bankAccountId);
-
-        let bonusForRecent = t.bonus;
-        if (t.type === 'WALVE') {
-          bonusForRecent = t.walve ?? t.bonus;
-        }
-
-        return {
-          id: t.id,
-          type: t.type,
-          amount: canViewFinancials ? t.amount : null, // Mask amount in recent transactions too? User didn't specify recent transactions but likely implied. Let's keep consistent.
-          bonus: canViewFinancials ? bonusForRecent : null,
-          date: t.date,
-          playerGameId: t.playerGameId,
-          operatorName: t.operatorName,
-          bankId: t.bankAccountId,
-          bankName: bank?.bank_name ?? null,
-          bankAlias: bank?.alias ?? null,
-          bankAccountNumberDisplay: bank?.account_number_display ?? null,
-        };
-      });
-
     // Build sub brand options for FE
     let subBrandOptions: any[] = [];
     try {
@@ -449,7 +435,6 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       bankReports,
       kioskReports,
       staffPerformance,
-      recentTransactions,
       subBrandOptions,
       partialErrors: {
         banks: banksResult.status === 'rejected',
