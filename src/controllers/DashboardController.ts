@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { Op } from 'sequelize';
 import { AuthRequest } from '../middleware/auth';
-import { BankAccount, Player, Transaction, User, Game, BankCatalog } from '../models';
+import { BankAccount, Player, Transaction, User, Game, BankCatalog, Role } from '../models';
 import { getCache, setCache } from '../services/CacheService';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
@@ -392,11 +392,15 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     try {
       const requesterId = req.user?.id;
       const requester: any = requesterId
-        ? await User.findByPk(requesterId, { include: [] } as any)
+        ? await User.findByPk(requesterId, {
+            attributes: ['id', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+            include: [{ model: Role, through: { attributes: [] }, required: false }],
+          } as any)
         : null;
-      const userRoles = (req.user as any)?.Roles || requester?.Roles || [];
+      const userRoles = requester?.Roles || [];
       const isSuperAdmin =
         Boolean(req.user?.is_super_admin) ||
+        Boolean(requester?.is_super_admin) ||
         Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
       const isOperator = Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
 

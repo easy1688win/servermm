@@ -105,29 +105,40 @@ Player.init({
     afterFind: async (instances: Player | Player[] | null) => {
       if (!instances) return;
       
-      const decryptInstance = async (inst: Player) => {
-        const existingUuid = inst.getDataValue('profile_uuid') as any;
+      const decryptInstance = async (inst: any) => {
+        const isModelInstance =
+          inst &&
+          typeof inst.getDataValue === 'function' &&
+          typeof inst.setDataValue === 'function';
+
+        const existingUuid = isModelInstance ? (inst.getDataValue('profile_uuid') as any) : (inst as any).profile_uuid;
+        const existingId = isModelInstance ? (inst.getDataValue('id') as any) : (inst as any).id;
         const hasValidUuid = typeof existingUuid === 'string' && /^\d{6}$/.test(existingUuid);
         if (!hasValidUuid) {
           for (let attempt = 0; attempt < 12; attempt++) {
             const candidate = generateProfileUuid();
             const exists = await Player.count({ where: { profile_uuid: candidate } });
             if (exists) continue;
-            inst.setDataValue('profile_uuid', candidate);
+            if (isModelInstance) {
+              inst.setDataValue('profile_uuid', candidate);
+            } else {
+              (inst as any).profile_uuid = candidate;
+            }
             try {
+              if (existingId == null) break;
               const where =
                 existingUuid == null
-                  ? ({ id: inst.getDataValue('id') as any, profile_uuid: null } as any)
-                  : ({ id: inst.getDataValue('id') as any, profile_uuid: existingUuid } as any);
-              const [updated] = await Player.update({ profile_uuid: candidate }, { where } as any);
+                  ? ({ id: existingId as any, profile_uuid: null } as any)
+                  : ({ id: existingId as any, profile_uuid: existingUuid } as any);
+              const [updated] = await Player.update({ profile_uuid: candidate }, { where, hooks: false } as any);
               if (updated) break;
             } catch {
               void 0;
             }
           }
         }
-        if (inst.metadata) {
-          let strValue = inst.metadata;
+        if (inst && (inst as any).metadata) {
+          let strValue = (inst as any).metadata;
           
           // Case 1: It's already an object (JSON field parsed by Sequelize)
           if (typeof strValue !== 'string') {
@@ -163,16 +174,16 @@ Player.init({
               const decrypted = decrypt(strValue);
               // Attempt to parse the decrypted string as JSON
               try {
-                inst.metadata = JSON.parse(decrypted);
+                (inst as any).metadata = JSON.parse(decrypted);
               } catch (jsonError) {
                 // If decrypted content is not valid JSON, keep it as string
-                inst.metadata = decrypted;
+                (inst as any).metadata = decrypted;
               }
             } catch (e) {
               // Decryption failed. 
               // Fallback: try to parse the original string as JSON
               try {
-                 inst.metadata = JSON.parse(strValue); 
+                 (inst as any).metadata = JSON.parse(strValue); 
               } catch (e2) {
                  // ignore, keep as is
               }
@@ -180,7 +191,7 @@ Player.init({
           } else {
             // Not encrypted, try to parse as JSON if it's a string
             try {
-               inst.metadata = JSON.parse(strValue); 
+               (inst as any).metadata = JSON.parse(strValue); 
             } catch (e2) {
                // ignore
             }
