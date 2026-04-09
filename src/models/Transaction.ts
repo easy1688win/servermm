@@ -121,7 +121,9 @@ Transaction.init({
   updatedAt: 'updated_at',
   indexes: [
     { fields: ['tenant_id', 'sub_brand_id'] },
-    { fields: ['sub_brand_id', 'created_at'] },
+    { fields: ['tenant_id', 'sub_brand_id', 'created_at'] },
+    { fields: ['tenant_id', 'sub_brand_id', 'type', 'created_at'] },
+    { fields: ['tenant_id', 'sub_brand_id', 'operator_id', 'created_at'] },
   ],
   hooks: {
     beforeCreate: (transaction) => {

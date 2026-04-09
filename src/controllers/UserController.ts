@@ -372,17 +372,32 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
       }
     }
 
-    const existing = await User.findOne({ where: { username } as any });
+    const usernameRaw = typeof username === 'string' ? username : String(username ?? '');
+    const passwordRaw = typeof password === 'string' ? password : String(password ?? '');
+    const trimmedUsername = usernameRaw.trim();
+
+    if (!trimmedUsername || !passwordRaw) {
+      sendError(res, 'Code602', 400, { detail: 'user_mgmt_username_and_password_required' });
+      return;
+    }
+
+    const usernameOk = /^[A-Za-z0-9._]+$/.test(trimmedUsername);
+    if (usernameRaw !== trimmedUsername || !usernameOk) {
+      sendError(res, 'Code602', 400, { detail: 'user_mgmt_username_invalid' });
+      return;
+    }
+
+    const existing = await User.findOne({ where: { username: trimmedUsername } as any });
     if (existing) {
         sendError(res, 'Code605', 400); // Username already exists
         return;
     }
 
-    const password_hash = await bcrypt.hash(password, 10);
+    const password_hash = await bcrypt.hash(passwordRaw, 10);
     const effectiveFullName = full_name ?? fullName;
     
     const user = await User.create({
-        username,
+        username: trimmedUsername,
         password_hash,
         full_name: effectiveFullName,
         currency: currency || 'USD',

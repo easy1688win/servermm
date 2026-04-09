@@ -9,6 +9,7 @@ import { Op } from 'sequelize';
 import { sanitizePlayerForResponse } from './PlayerController';
 import { sanitizeBankAccountForResponse } from './BankAccountController';
 import { decrypt, isEncrypted } from '../utils/encryption';
+import { getCache, setCache } from '../services/CacheService';
 import { sendSuccess, sendError } from '../utils/response';
 import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
 
@@ -285,9 +286,13 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
   try {
     const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
-    const scope = (req.query.scope as string | undefined) || null;
+    let scope = (req.query.scope as string | undefined) || null;
+    if (!scope && req.originalUrl && req.originalUrl.includes('/reports/kiosk')) {
+      scope = 'kiosk';
+    }
 
     if (scope === 'kiosk') {
+      const isSummaryReport = Boolean(req.originalUrl && req.originalUrl.includes('/reports/summary'));
       const startRaw = (req.query.startDate as string | undefined) ?? (req.query.start_date as string | undefined) ?? null;
       const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
 
@@ -327,152 +332,143 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       const txPermissions = Array.from(new Set([...userPermissions, 'view:player_profit']));
       const canViewUsers = userPermissions.includes('action:user_view');
+      const canViewProfit = txPermissions.includes('view:player_profit');
+      const kioskCacheKey = [
+        'kiosk_context_v1',
+        tenancy.tenant_id,
+        tenancy.sub_brand_id,
+        startDate.toISOString(),
+        endDate.toISOString(),
+        canViewUsers ? 'u1' : 'u0',
+        canViewProfit ? 'p1' : 'p0',
+        req.user?.id ?? 0,
+        isSummaryReport ? 's1' : 's0',
+      ].join(':');
+      const cached = getCache(kioskCacheKey);
+      if (cached) {
+        res.setHeader('Cache-Control', 'private, max-age=3');
+        return sendSuccess(res, 'Code1', cached);
+      }
 
       const [transactions, gamesRaw, adjustmentsRaw] = await Promise.all([
         Transaction.findAll({
+          attributes: [
+            'id',
+            'created_at',
+            'type',
+            'amount',
+            'bonus',
+            'walve',
+            'tips',
+            'remark',
+            'status',
+            'game_id',
+            'player_id',
+            'operator_id',
+            'game_balance_after',
+          ],
           where: withTenancyWhere(tenancy, txWhere),
           include: [
             {
               model: Player,
               required: false,
+              attributes: ['id', 'player_game_id'],
               where: withTenancyWhere(tenancy) as any,
-              include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }],
             },
-            { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
-            { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
+            ...(isSummaryReport
+              ? []
+              : [{ model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] }]),
           ],
           order: [['created_at', 'DESC']],
           limit: 1000,
+          hooks: false,
         } as any),
-        Game.findAll({
-          where: withTenancyWhere(tenancy, { status: 'active' }),
-          order: [['name', 'ASC']],
-        } as any),
-        GameAdjustment.findAll({
-          where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startDate, endDate] } } as any),
-          order: [['createdAt', 'DESC']],
-        } as any),
+        isSummaryReport
+          ? Promise.resolve([] as any[])
+          : Game.findAll({
+              attributes: ['id', 'name', 'icon', 'balance'],
+              where: withTenancyWhere(tenancy, { status: 'active' }),
+              order: [['name', 'ASC']],
+            } as any),
+        isSummaryReport
+          ? Promise.resolve([] as any[])
+          : GameAdjustment.findAll({
+              where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startDate, endDate] } } as any),
+              order: [['createdAt', 'DESC']],
+            } as any),
       ]);
-      
-      const allOperators = canViewUsers ? await User.findAll({
-        attributes: ['id', 'username', 'full_name'],
-        where: withTenancyWhere(tenancy, { status: 'active' } as any),
-        order: [['username', 'ASC']],
-      }) : [];
-      
-      let operatorOptions: any[] = [];
-      if (canViewUsers) {
-        operatorOptions = (allOperators as any[])
-          .map((u) => {
-            const name = resolveOperatorName(u);
-            return name ? { id: u.id, name } : null;
-          })
-          .filter(Boolean);
-      } else if (req.user) {
-         const name = resolveOperatorName(req.user);
-         if (name) {
-            operatorOptions = [{ id: req.user.id, name }];
-         }
-      }
 
-      const shapedTransactions = shapeTransactionsForResponse(
-        transactions as any[],
-        txPermissions,
-      ).map(
-        (t: any) => {
-          const type = t.type as string;
-          const baseAmount = t.amount != null ? Number(t.amount) : 0;
-          const bonusNum = Number((t as any).bonus ?? 0);
-          const walveNum = Number((t as any).walve ?? 0);
-          const tipsNum = Number((t as any).tips ?? 0);
-          const gameAfterRaw = (t as any).game_balance_after;
+      const shapedTransactions = (transactions as any[]).map((t: any) => {
+        const json = t && typeof t.get === 'function' ? t.get({ plain: true }) : t;
+        const type = String(json?.type ?? '');
+        const baseAmount = json?.amount != null ? Number(json.amount) : 0;
+        const bonusNum = Number(json?.bonus ?? 0);
+        const walveNum = Number(json?.walve ?? 0);
+        const tipsNum = Number(json?.tips ?? 0);
+        const gameAfterRaw = json?.game_balance_after;
 
-          let gameAfter: number | null = null;
-          let gameBefore: number | null = null;
-          let signedForGame = 0;
-          let kioskTotal = baseAmount;
+        let gameAfter: number | null = null;
+        let gameBefore: number | null = null;
+        let signedForGame = 0;
+        let kioskTotal = baseAmount;
 
-          if (type === 'DEPOSIT') {
-            const r = getTransactionAmounts({
-              type: 'DEPOSIT',
-              amount: baseAmount,
-              bonus: bonusNum,
-              walve: 0,
-              tips: 0,
-            });
-            signedForGame = r.gameDelta;
-            kioskTotal = r.displayTotal;
-          } else if (type === 'WITHDRAWAL') {
-            const r = getTransactionAmounts({
-              type: 'WITHDRAWAL',
-              amount: baseAmount,
-              bonus: 0,
-              walve: walveNum,
-              tips: tipsNum,
-            });
-            signedForGame = r.gameDelta;
-            kioskTotal = r.displayTotal;
-          } else if (type === 'WALVE') {
-            const r = getTransactionAmounts({
-              type: 'WALVE',
-              amount: 0,
-              bonus: 0,
-              walve: walveNum,
-              tips: 0,
-            });
-            signedForGame = r.gameDelta;
-            kioskTotal = r.displayTotal;
-          } else if (type === 'BURN') {
-            signedForGame = baseAmount;
-            kioskTotal = baseAmount;
-          }
+        if (type === 'DEPOSIT') {
+          const r = getTransactionAmounts({ type: 'DEPOSIT', amount: baseAmount, bonus: bonusNum, walve: 0, tips: 0 });
+          signedForGame = r.gameDelta;
+          kioskTotal = r.displayTotal;
+        } else if (type === 'WITHDRAWAL') {
+          const r = getTransactionAmounts({ type: 'WITHDRAWAL', amount: baseAmount, bonus: 0, walve: walveNum, tips: tipsNum });
+          signedForGame = r.gameDelta;
+          kioskTotal = r.displayTotal;
+        } else if (type === 'WALVE') {
+          const r = getTransactionAmounts({ type: 'WALVE', amount: 0, bonus: 0, walve: walveNum, tips: 0 });
+          signedForGame = r.gameDelta;
+          kioskTotal = r.displayTotal;
+        } else if (type === 'BURN') {
+          signedForGame = baseAmount;
+          kioskTotal = baseAmount;
+        }
 
-          if (gameAfterRaw != null) {
-            gameAfter = Number(gameAfterRaw);
-            gameBefore = gameAfter - signedForGame;
-          }
+        if (gameAfterRaw != null) {
+          gameAfter = Number(gameAfterRaw);
+          gameBefore = gameAfter - signedForGame;
+        }
 
-          const createdAt = t.createdAt ?? t.created_at ?? null;
-          const playerGameId = t.Player?.player_game_id ?? t.player_game_id ?? null;
+        const createdAt = json?.createdAt ?? json?.created_at ?? null;
+        const playerGameId = json?.Player?.player_game_id ?? null;
+        const gameId = json?.game_id ?? null;
 
-          const directGame = t.Game;
-          const nestedGame = t.Player?.Game;
-          const gameId = t.game_id ?? directGame?.id ?? nestedGame?.id ?? null;
-          const gameName = directGame?.name ?? nestedGame?.name ?? t.game_name ?? null;
+        const op = json?.operator || json?.Operator || null;
+        const opFullName = isSummaryReport ? null : resolveOperatorName(op);
 
-          const op = t.operator || t.Operator || null;
-          const opFullName = resolveOperatorName(op);
+        const rawRemark = json?.remark != null ? String(json.remark) : '';
+        const remark = rawRemark.trim().length > 0
+          ? (isEncrypted(rawRemark) ? decrypt(rawRemark) : rawRemark)
+          : null;
 
-          const remark =
-            (t as any).remark ??
-            (t as any).staff_note ??
-            null;
-
-          return {
-            id: t.id,
-            createdAt,
-            type: t.type,
-            amount: baseAmount,
-            bonus: bonusNum,
-            walve: walveNum,
-            tips: tipsNum,
-            kiosk_total: kioskTotal,
-            status: t.status ?? null,
-            game_id: gameId,
-            Player: playerGameId
-              ? {
-                  id: t.player_id ?? null,
-                  player_game_id: playerGameId,
-                  Game: gameId && gameName ? { id: gameId, name: gameName } : undefined,
-                }
-              : null,
-            operator: opFullName ? { id: t.operator_id ?? null, full_name: opFullName } : null,
-            staff_note: remark,
-            game_balance_before: gameBefore,
-            game_balance_after: gameAfter,
-          };
-        },
-      );
+        return {
+          id: json?.id ?? null,
+          createdAt,
+          type,
+          amount: canViewProfit ? baseAmount : null,
+          bonus: canViewProfit ? bonusNum : null,
+          walve: walveNum,
+          tips: tipsNum,
+          kiosk_total: canViewProfit ? kioskTotal : null,
+          status: json?.status ?? null,
+          game_id: gameId,
+          Player: playerGameId
+            ? {
+                id: json?.player_id ?? json?.Player?.id ?? null,
+                player_game_id: playerGameId,
+              }
+            : null,
+          operator: opFullName ? { id: json?.operator_id ?? null, full_name: opFullName } : null,
+          staff_note: remark,
+          game_balance_before: gameBefore,
+          game_balance_after: gameAfter,
+        };
+      });
 
       const games = (gamesRaw as any[]).map((g: any) => ({
         id: g.id,
@@ -480,12 +476,6 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         icon: g.icon,
         balance: typeof g.balance === 'number' ? g.balance : Number(g.balance ?? 0),
       }));
-
-      const gameIconMap: Record<string, string | null> = {};
-      for (const g of gamesRaw as any[]) {
-        if (!g || !g.name) continue;
-        gameIconMap[g.name] = g.icon || null;
-      }
 
       const gameAdjustments = (adjustmentsRaw as any[]).map((a: any) => {
         const amount = a.amount != null ? Number(a.amount) : 0;
@@ -511,9 +501,45 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           ip: a.ip_address ?? null,
           beforeBalance,
           afterBalance,
-          date: a.createdAt,
+          date: new Date(a.createdAt).toISOString(),
         };
       });
+
+      let operatorOptions: any[] = [];
+      if (!isSummaryReport) {
+        if (canViewUsers) {
+          const operatorIds = Array.from(
+            new Set(
+              (transactions as any[])
+                .map((t: any) => {
+                  const json = t && typeof t.get === 'function' ? t.get({ plain: true }) : t;
+                  const id = json?.operator_id ?? json?.operator?.id ?? null;
+                  const n = id != null ? Number(id) : null;
+                  return n && Number.isFinite(n) ? n : null;
+                })
+                .filter((x: any) => x != null),
+            ),
+          );
+          const operators = operatorIds.length
+            ? await User.findAll({
+                attributes: ['id', 'username', 'full_name'],
+                where: withTenancyWhere(tenancy, { id: { [Op.in]: operatorIds }, status: 'active' } as any),
+                order: [['username', 'ASC']],
+              } as any)
+            : [];
+          operatorOptions = (operators as any[])
+            .map((u) => {
+              const name = resolveOperatorName(u);
+              return name ? { id: u.id, name } : null;
+            })
+            .filter(Boolean);
+        } else if (req.user) {
+          const name = resolveOperatorName(req.user);
+          if (name) {
+            operatorOptions = [{ id: req.user.id, name }];
+          }
+        }
+      }
 
       let subBrandOptions: any[] = [];
       try {
@@ -553,15 +579,22 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       } catch {
       }
 
-      return sendSuccess(res, 'Code1', {
+      const payload = {
         generatedAt: new Date().toISOString(),
-        games,
-        gameIconMap,
         transactions: shapedTransactions,
-        gameAdjustments,
-        operatorOptions,
+        ...(isSummaryReport
+          ? {}
+          : {
+              games,
+              gameAdjustments,
+              operatorOptions,
+            }),
         subBrandOptions,
-      });
+      };
+
+      setCache(kioskCacheKey, payload, 3);
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      return sendSuccess(res, 'Code1', payload);
     }
 
     if (scope === 'history') {
@@ -573,6 +606,15 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       if (!Number.isFinite(pageSize) || pageSize < 1) pageSize = 50;
       if (pageSize > 200) pageSize = 200;
       const offset = (page - 1) * pageSize;
+
+      const includeMetaRaw =
+        (req.query.includeMeta as string | undefined) ??
+        (req.query.include_meta as string | undefined) ??
+        null;
+      const includeMeta =
+        includeMetaRaw == null
+          ? true
+          : !['0', 'false', 'no'].includes(includeMetaRaw.trim().toLowerCase());
 
       const where: any = {
         type: { [Op.ne]: 'ADJUSTMENT' },
@@ -649,28 +691,6 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         }
       }
 
-      // Fetch base dataset; we'll apply precise filtering in memory (handles decrypted fields)
-      const rows = await Transaction.findAll({
-        where: withTenancyWhere(tenancy, where),
-        include: [
-          {
-            model: Player,
-            required: false,
-            where: withTenancyWhere(tenancy) as any,
-            include: [{ model: Game, required: false, where: withTenancyWhere(tenancy) as any }],
-          },
-          { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
-          { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
-          { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
-        ],
-        order: [['created_at', 'DESC']],
-      } as any);
-
-      const txPermissions = Array.from(
-        new Set<string>([...userPermissions, 'view:player_profit']),
-      );
-
-      // Precise in-memory filtering consistent with Player Management
       const normalizeDigits = (s: string) => String(s || '').replace(/\D/g, '');
       const qLower = qRaw.toLowerCase();
       const qDigits = normalizeDigits(qRaw);
@@ -679,6 +699,308 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       const statusFilter = (req.query.status as string | undefined)?.trim() || '';
       const operatorIdNum =
         operatorIdRaw && !Number.isNaN(Number(operatorIdRaw)) ? Number(operatorIdRaw) : null;
+      const canViewUsers = userPermissions.includes('action:user_view');
+
+      const historyCacheKey = [
+        'tx_history_v2',
+        tenancy.tenant_id,
+        tenancy.sub_brand_id,
+        page,
+        pageSize,
+        includeMeta ? 'm1' : 'm0',
+        qRaw || '',
+        (searchType || '').toLowerCase(),
+        operatorIdNum ?? '',
+        typeFilter || '',
+        statusFilter || '',
+        (where.created_at && typeof where.created_at === 'object') ? JSON.stringify(where.created_at) : '',
+      ].join(':');
+      const cached = getCache(historyCacheKey);
+      if (cached) {
+        res.setHeader('Cache-Control', 'private, max-age=3');
+        return sendSuccess(res, 'Code1', cached);
+      }
+
+      const stLower = (searchType || 'transaction_id').toLowerCase();
+      const canSqlSearch = !hasTextSearch || stLower === 'transaction_id' || stLower === 'player_id';
+
+      // Fetch base dataset only for slow-path searches (encrypted fields)
+      const rows = canSqlSearch
+        ? ([] as any[])
+        : await Transaction.findAll({
+            attributes: [
+              'id',
+              'created_at',
+              'type',
+              'amount',
+              'bonus',
+              'walve',
+              'tips',
+              'status',
+              'remark',
+              'ip_address',
+              'game_id',
+              'game_account_id',
+              'bank_account_id',
+              'player_id',
+              'operator_id',
+              'vendor_credit_before',
+              'vendor_credit_after',
+              'game_balance_after',
+              'bank_balance_after',
+            ],
+            where: withTenancyWhere(tenancy, where),
+            include: [
+              {
+                model: Player,
+                required: false,
+                attributes: ['id', 'player_game_id'],
+                where: withTenancyWhere(tenancy) as any,
+              },
+              { model: Game, required: false, attributes: ['id', 'name', 'icon'], where: withTenancyWhere(tenancy) as any },
+              { model: User, as: 'operator', required: false, attributes: ['id', 'username', 'full_name'] },
+            ],
+            order: [['created_at', 'DESC']],
+            hooks: false,
+          } as any);
+
+      const txPermissions = Array.from(new Set<string>([...userPermissions, 'view:player_profit']));
+      if (canSqlSearch) {
+        if (operatorIdNum != null) where.operator_id = operatorIdNum;
+        if (typeFilter) where.type = typeFilter.toUpperCase();
+        if (statusFilter) where.status = statusFilter.toUpperCase();
+
+        if (hasTextSearch && stLower === 'transaction_id') {
+          if (!qDigits) {
+            const payload = {
+              transactions: [],
+              pagination: { page, pageSize, totalItems: 0, totalPages: 0 },
+            };
+            setCache(historyCacheKey, payload, 3);
+            res.setHeader('Cache-Control', 'private, max-age=3');
+            return sendSuccess(res, 'Code1', payload);
+          }
+          where.id = qDigits;
+        }
+
+        const playerInclude: any = {
+          model: Player,
+          required: false,
+          attributes: ['id', 'player_game_id'],
+          where: withTenancyWhere(tenancy) as any,
+        };
+        if (hasTextSearch && stLower === 'player_id') {
+          playerInclude.required = true;
+          playerInclude.where = withTenancyWhere(tenancy, { player_game_id: { [Op.like]: `%${qRaw}%` } } as any) as any;
+        }
+
+        const { rows: dbRows, count } = await Transaction.findAndCountAll({
+          attributes: [
+            'id',
+            'created_at',
+            'type',
+            'amount',
+            'bonus',
+            'walve',
+            'tips',
+            'status',
+            'remark',
+            'ip_address',
+            'game_id',
+            'game_account_id',
+            'bank_account_id',
+            'player_id',
+            'operator_id',
+            'vendor_credit_before',
+            'vendor_credit_after',
+            'game_balance_after',
+            'bank_balance_after',
+          ],
+          where: withTenancyWhere(tenancy, where),
+          include: [
+            playerInclude,
+            { model: Game, required: false, attributes: ['id', 'name', 'icon'], where: withTenancyWhere(tenancy) as any },
+            { model: User, as: 'operator', required: false, attributes: ['id', 'username', 'full_name'] },
+          ],
+          order: [['created_at', 'DESC']],
+          limit: pageSize,
+          offset,
+          distinct: true,
+          hooks: false,
+        } as any);
+
+        const totalItems = typeof count === 'number' ? count : Number((count as any) ?? 0);
+        const totalPages = pageSize > 0 ? Math.ceil(totalItems / pageSize) : 1;
+
+        const pageRows = (dbRows as any[]).map((r: any) => (r && typeof r.get === 'function' ? r.get({ plain: true }) : r));
+
+        const gameIds = Array.from(new Set(pageRows.map((r) => Number(r?.game_id ?? null)).filter((x) => Number.isFinite(x) && x > 0)));
+        const appIdByGameId = new Map<number, string>();
+        if (gameIds.length > 0) {
+          const gamesForAppId = await Game.findAll({
+            attributes: ['id', 'vendor_config'],
+            where: withTenancyWhere(tenancy, { id: { [Op.in]: gameIds } } as any),
+          } as any);
+          for (const g of gamesForAppId as any[]) {
+            const id = Number((g as any)?.id ?? null);
+            if (!Number.isFinite(id) || id <= 0) continue;
+            let cfg: any = (g as any).vendor_config;
+            if (typeof cfg === 'string') {
+              const s = cfg.trim();
+              if (s.startsWith('{') || s.startsWith('[')) {
+                try {
+                  cfg = JSON.parse(s);
+                } catch {
+                  cfg = null;
+                }
+              } else {
+                cfg = null;
+              }
+            }
+            const appId = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? String((cfg as any).appId || '').trim() : '';
+            if (appId) appIdByGameId.set(id, appId);
+          }
+        }
+
+        const payloadTransactions = pageRows.map((t: any) => {
+          const rawRemark = t?.remark != null ? String(t.remark) : '';
+          const remark = rawRemark.trim().length > 0 ? (isEncrypted(rawRemark) ? decrypt(rawRemark) : rawRemark) : null;
+          const rawIp = t?.ip_address != null ? String(t.ip_address) : '';
+          const ipDec = rawIp.trim().length > 0 ? (isEncrypted(rawIp) ? decrypt(rawIp) : rawIp) : '';
+          const ip = normalizeIp(ipDec) || null;
+          const rawGameAccount = t?.game_account_id != null ? String(t.game_account_id) : '';
+          const gameAccountId = rawGameAccount.trim().length > 0 ? (isEncrypted(rawGameAccount) ? decrypt(rawGameAccount) : rawGameAccount) : '';
+          const accountId = gameAccountId.trim();
+          const gameId = Number(t?.game_id ?? null);
+          const appId = Number.isFinite(gameId) && gameId > 0 ? (appIdByGameId.get(gameId) ?? '') : '';
+          const displayGameAccountId =
+            accountId && appId && !accountId.includes('.') ? `${appId}.${accountId}` : (accountId || null);
+
+          const opFullName = resolveOperatorName(t?.operator || t?.Operator || null);
+          const playerGameId = t?.Player?.player_game_id ?? null;
+          const gameName = t?.Game?.name ?? null;
+
+          return {
+            id: t?.id ?? null,
+            createdAt: t?.created_at ?? null,
+            type: t?.type ?? null,
+            amount: t?.amount ?? null,
+            bonus: t?.bonus ?? null,
+            walve: t?.walve ?? null,
+            tips: t?.tips ?? null,
+            vendor_credit_before: t?.vendor_credit_before ?? null,
+            vendor_credit_after: t?.vendor_credit_after ?? null,
+            bank_account_id: t?.bank_account_id ?? null,
+            player_id: t?.player_id ?? null,
+            player_game_id: playerGameId,
+            game_name: gameName,
+            game_account_id: accountId || null,
+            display_game_account_id: displayGameAccountId,
+            remark,
+            status: t?.status ?? null,
+            ip,
+            operator: opFullName ? { full_name: opFullName } : null,
+          };
+        });
+
+        const payload: any = {
+          transactions: payloadTransactions,
+          pagination: { page, pageSize, totalItems, totalPages },
+        };
+
+        if (includeMeta) {
+          const metaCacheKey = `tx_history_meta_v1:${tenancy.tenant_id}:${tenancy.sub_brand_id}:${canViewUsers ? 'u1' : 'u0'}:${req.user?.id ?? 0}`;
+          const cachedMeta = getCache(metaCacheKey) as any;
+          if (cachedMeta) {
+            Object.assign(payload, cachedMeta);
+          } else {
+            const [bankAccounts, games, bankCatalog] = await Promise.all([
+              BankAccount.findAll({ attributes: ['id', 'bank_name'], where: withTenancyWhere(tenancy) } as any),
+              Game.findAll({ attributes: ['id', 'name', 'icon'], where: withTenancyWhere(tenancy) as any, order: [['name', 'ASC']] } as any),
+              BankCatalog.findAll({ attributes: ['name', 'icon'], order: [['name', 'ASC']] } as any),
+            ]);
+
+            const bankIconMap: Record<string, string | null> = {};
+            for (const bc of bankCatalog as any[]) {
+              if (!bc || !bc.name) continue;
+              bankIconMap[bc.name] = (bc as any).icon || null;
+            }
+
+            let operatorOptions: any[] = [];
+            if (canViewUsers) {
+              const allOperators = await User.findAll({
+                attributes: ['id', 'username', 'full_name'],
+                where: { tenant_id: tenancy.tenant_id, status: 'active' } as any,
+                order: [['username', 'ASC']],
+              } as any);
+              operatorOptions = (allOperators as any[])
+                .map((u) => {
+                  const name = resolveOperatorName(u);
+                  return name ? { id: u.id, name } : null;
+                })
+                .filter(Boolean);
+            } else if (req.user) {
+              const name = resolveOperatorName(req.user);
+              if (name) {
+                operatorOptions = [{ id: req.user.id, name }];
+              }
+            }
+
+            let subBrandOptions: any[] = [];
+            try {
+              const requesterId = req.user?.id;
+              const requester: any = requesterId
+                ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+                : null;
+              if (requester) {
+                const isSuperAdmin =
+                  Boolean(req.user?.is_super_admin) ||
+                  Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+                const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+                let sbRows: any[] = [];
+                if (isSuperAdmin) {
+                  sbRows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+                } else if (isOperator) {
+                  const tid = Number(requester?.tenant_id ?? null);
+                  if (Number.isFinite(tid) && tid > 0) {
+                    sbRows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+                  }
+                } else {
+                  const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+                  if (Number.isFinite(sbid) && sbid > 0) {
+                    sbRows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+                  }
+                }
+
+                subBrandOptions = (sbRows as any[]).map((sb) => ({
+                  id: sb.id,
+                  tenant_id: (sb as any).tenant_id ?? null,
+                  code: (sb as any).code ?? null,
+                  name: (sb as any).name ?? null,
+                  status: (sb as any).status ?? null,
+                }));
+              }
+            } catch {
+            }
+
+            const metaPayload = {
+              bankAccounts: (bankAccounts as any[]).map((b) => ({ id: b.id, bank_name: (b as any).bank_name })),
+              games: (games as any[]).map((g) => ({ id: g.id, name: (g as any).name, icon: (g as any).icon || null })),
+              bankIconMap,
+              operatorOptions,
+              subBrandOptions,
+            };
+
+            Object.assign(payload, metaPayload);
+            setCache(metaCacheKey, metaPayload, 30);
+          }
+        }
+
+        setCache(historyCacheKey, payload, 3);
+        res.setHeader('Cache-Control', 'private, max-age=3');
+        return sendSuccess(res, 'Code1', payload);
+      }
 
       const filteredRows = (rows as any[]).filter((t) => {
         // Apply dropdown filters regardless of text search
@@ -895,8 +1217,6 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         id: g.id,
         name: g.name,
       }));
-
-      const canViewUsers = userPermissions.includes('action:user_view');
 
       const allOperators = canViewUsers
         ? await User.findAll({

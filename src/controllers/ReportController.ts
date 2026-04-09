@@ -1,12 +1,13 @@
 import { Response } from 'express';
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import sequelize from '../config/database';
 import { AuthRequest } from '../middleware/auth';
-import { Game, Player, Product, Transaction } from '../models';
+import { Game, Player, Product, Role, SubBrand, Transaction, User } from '../models';
 import { VendorFactory } from '../services/vendor/VendorFactory';
 import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 import { sendError, sendSuccess } from '../utils/response';
 import { getClientIp, logAudit } from '../services/AuditService';
+import { getCache, setCache } from '../services/CacheService';
 
 let reportTransactionsSynced = false;
 const ensureReportTransactionsSynced = async () => {
@@ -114,6 +115,357 @@ const resolveVendorServiceForScope = async (scope: any, gameId: number | null, c
   return null;
 };
 
+export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const userPermissions: string[] = req.user?.permissions || [];
+    const canViewUsers = userPermissions.includes('action:user_view');
+    const canViewProfit = userPermissions.includes('view:player_profit');
+
+    const startRaw = (req.query.startDate as string | undefined) ?? (req.query.start_date as string | undefined) ?? null;
+    const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
+
+    const now = new Date();
+    let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    let endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
+    if (startRaw) {
+      const parsed = parseDateParam(startRaw);
+      if (!Number.isNaN(parsed.getTime())) startDate = parsed;
+    }
+    if (endRaw) {
+      const parsed = parseDateParam(endRaw);
+      if (!Number.isNaN(parsed.getTime())) endDate = parsed;
+    }
+
+    const cacheKey = [
+      'summary_report_v1',
+      scope.tenant_id,
+      scope.sub_brand_id,
+      startDate.toISOString(),
+      endDate.toISOString(),
+      canViewUsers ? 'u1' : 'u0',
+      canViewProfit ? 'p1' : 'p0',
+      req.user?.id ?? 0,
+    ].join(':');
+    const cached = getCache(cacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      return sendSuccess(res, 'Code1', cached);
+    }
+
+    const sql = `
+      SELECT
+        DATE(t.created_at) AS dayKey,
+        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN 1 ELSE 0 END) AS depositQty,
+        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN t.amount ELSE 0 END) AS deposit,
+        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN t.bonus ELSE 0 END) AS bonus,
+        SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN 1 ELSE 0 END) AS withdrawQty,
+        SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN t.amount ELSE 0 END) AS withdraw,
+        SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN t.tips ELSE 0 END) AS tips,
+        SUM(
+          CASE
+            WHEN t.status = 'COMPLETED' AND t.type = 'BURN' THEN t.amount
+            WHEN t.status = 'COMPLETED' AND t.type IN ('WITHDRAWAL', 'WALVE') THEN t.walve
+            ELSE 0
+          END
+        ) AS waive,
+        COUNT(DISTINCT CASE WHEN t.status = 'COMPLETED' THEN p.player_game_id ELSE NULL END) AS playerQty
+      FROM transactions t
+      LEFT JOIN players p
+        ON p.id = t.player_id
+        AND p.tenant_id = t.tenant_id
+        AND p.sub_brand_id = t.sub_brand_id
+      WHERE t.tenant_id = :tenantId
+        AND t.sub_brand_id = :subBrandId
+        AND t.created_at BETWEEN :startAt AND :endAt
+        AND t.type IN ('DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BURN')
+      GROUP BY dayKey
+      ORDER BY dayKey ASC
+    `;
+
+    const rawRows = (await sequelize.query(sql, {
+      replacements: {
+        tenantId: scope.tenant_id,
+        subBrandId: scope.sub_brand_id,
+        startAt: startDate,
+        endAt: endDate,
+      },
+      type: QueryTypes.SELECT,
+    })) as any[];
+
+    const rowMap = new Map<string, any>();
+    for (const r of rawRows) {
+      const key = String(r?.dayKey ?? '').trim();
+      if (!key) continue;
+      rowMap.set(key, r);
+    }
+
+    const startKey = toYmdInTz8(startDate);
+    const endKey = toYmdInTz8(endDate);
+    const startCursor = parseDateParam(`${startKey} 00:00:00`);
+    const endCursor = parseDateParam(`${endKey} 00:00:00`);
+    const from = startCursor.getTime() <= endCursor.getTime() ? startCursor : endCursor;
+    const to = startCursor.getTime() <= endCursor.getTime() ? endCursor : startCursor;
+
+    const rows: any[] = [];
+    for (let d = new Date(from.getTime()); d.getTime() <= to.getTime(); d = addDays(d, 1)) {
+      const key = toYmdInTz8(d);
+      const base = rowMap.get(key) || {};
+      const depositQty = Number(base.depositQty ?? 0) || 0;
+      const deposit = toFiniteNumber(base.deposit ?? 0);
+      const bonus = toFiniteNumber(base.bonus ?? 0);
+      const withdrawQty = Number(base.withdrawQty ?? 0) || 0;
+      const withdraw = toFiniteNumber(base.withdraw ?? 0);
+      const tips = toFiniteNumber(base.tips ?? 0);
+      const waive = toFiniteNumber(base.waive ?? 0);
+      const playerQty = Number(base.playerQty ?? 0) || 0;
+
+      const balance = deposit - withdraw;
+      const bonusPct = deposit ? (bonus / deposit) * 100 : 0;
+      const winPct = deposit ? (balance / deposit) * 100 : 0;
+
+      const dd = String(key.slice(8, 10)).padStart(2, '0');
+      const mm = String(key.slice(5, 7)).padStart(2, '0');
+
+      rows.push({
+        key,
+        dateLabel: `${dd}-${mm}`,
+        depositQty,
+        deposit,
+        bonus,
+        bonusPct,
+        withdrawQty,
+        withdraw,
+        tips,
+        waive,
+        balance,
+        winPct,
+        playerQty,
+      });
+    }
+
+    let subBrandOptions: any[] = [];
+    try {
+      const requesterId = req.user?.id;
+      const requester: any = requesterId
+        ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+        : null;
+      if (requester) {
+        const isSuperAdmin =
+          Boolean(req.user?.is_super_admin) ||
+          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+
+        let sbs: any[] = [];
+        if (isSuperAdmin) {
+          sbs = await SubBrand.findAll({ order: [['id', 'ASC']] });
+        } else if (isOperator) {
+          const tid = Number(requester?.tenant_id ?? null);
+          if (Number.isFinite(tid) && tid > 0) {
+            sbs = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          }
+        } else {
+          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+          if (Number.isFinite(sbid) && sbid > 0) {
+            sbs = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+          }
+        }
+
+        subBrandOptions = (sbs as any[]).map((sb) => ({
+          id: sb.id,
+          tenant_id: (sb as any).tenant_id ?? null,
+          code: (sb as any).code ?? null,
+          name: (sb as any).name ?? null,
+          status: (sb as any).status ?? null,
+        }));
+      }
+    } catch {
+    }
+
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      rows,
+      subBrandOptions,
+    };
+
+    setCache(cacheKey, payload, 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    return sendSuccess(res, 'Code1', payload);
+  } catch (e) {
+    sendError(res, 'Code314', 500);
+  }
+};
+
+export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const startRaw = (req.query.startDate as string | undefined) ?? (req.query.start_date as string | undefined) ?? null;
+    const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
+    const tenantIdRaw = (req.query.tenantId as string | undefined) ?? (req.query.tenant_id as string | undefined) ?? null;
+    const isSuperAdmin = Boolean(req.user?.is_super_admin);
+
+    const now = new Date();
+    let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    let endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    if (startRaw) {
+      const p = parseDateParam(startRaw);
+      if (!Number.isNaN(p.getTime())) startDate = p;
+    }
+    if (endRaw) {
+      const p = parseDateParam(endRaw);
+      if (!Number.isNaN(p.getTime())) endDate = p;
+    }
+
+    let effectiveTenantId = scope.tenant_id;
+    if (isSuperAdmin && tenantIdRaw && tenantIdRaw.trim().length > 0) {
+      const tid = Number(tenantIdRaw);
+      if (Number.isFinite(tid) && tid > 0) {
+        effectiveTenantId = tid;
+      }
+    }
+
+    const cacheKey = [
+      'subbrand_winloss_v1',
+      effectiveTenantId,
+      startDate.toISOString(),
+      endDate.toISOString(),
+    ].join(':');
+    const cached = getCache(cacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      return sendSuccess(res, 'Code1', cached);
+    }
+
+    const sql = `
+      SELECT
+        sb.id AS subBrandId,
+        sb.name AS subBrandName,
+        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN 1 ELSE 0 END) AS depositQty,
+        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN t.amount ELSE 0 END) AS deposit,
+        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN t.bonus ELSE 0 END) AS bonus,
+        SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN 1 ELSE 0 END) AS withdrawQty,
+        SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN t.amount ELSE 0 END) AS withdraw,
+        SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN t.tips ELSE 0 END) AS tips,
+        SUM(
+          CASE
+            WHEN t.status='COMPLETED' AND t.type='BURN' THEN t.amount
+            WHEN t.status='COMPLETED' AND t.type IN ('WITHDRAWAL','WALVE') THEN t.walve
+            ELSE 0
+          END
+        ) AS waive,
+        MAX(COALESCE(ba.bankAdjustment, 0)) AS bankAdjustment,
+        MAX(COALESCE(ga.gameAdjustment, 0)) AS gameAdjustment,
+        COUNT(DISTINCT CASE WHEN t.status='COMPLETED' THEN p.player_game_id ELSE NULL END) AS playerQty
+      FROM sub_brands sb
+      LEFT JOIN transactions t
+        ON t.sub_brand_id = sb.id
+        AND t.tenant_id = :tenantId
+        AND t.created_at BETWEEN :startAt AND :endAt
+        AND t.type IN ('DEPOSIT','WITHDRAWAL','WALVE','BURN')
+      LEFT JOIN (
+        SELECT
+          sub_brand_id AS subBrandId,
+          SUM(amount) AS bankAdjustment
+        FROM transactions
+        WHERE tenant_id = :tenantId
+          AND created_at BETWEEN :startAt AND :endAt
+          AND status = 'COMPLETED'
+          AND type = 'ADJUSTMENT'
+        GROUP BY sub_brand_id
+      ) ba ON ba.subBrandId = sb.id
+      LEFT JOIN (
+        SELECT
+          sub_brand_id AS subBrandId,
+          SUM(CASE WHEN type = 'TOPUP' THEN amount ELSE -amount END) AS gameAdjustment
+        FROM game_adjustments
+        WHERE tenant_id = :tenantId
+          AND createdAt BETWEEN :startAt AND :endAt
+        GROUP BY sub_brand_id
+      ) ga ON ga.subBrandId = sb.id
+      LEFT JOIN players p
+        ON p.id = t.player_id
+        AND p.tenant_id = t.tenant_id
+        AND p.sub_brand_id = t.sub_brand_id
+      WHERE sb.tenant_id = :tenantId
+      GROUP BY sb.id, sb.name
+      ORDER BY sb.id ASC
+    `;
+
+    const rowsRaw = (await sequelize.query(sql, {
+      replacements: {
+        tenantId: effectiveTenantId,
+        startAt: startDate,
+        endAt: endDate,
+      },
+      type: QueryTypes.SELECT,
+    })) as any[];
+
+    const rows = rowsRaw.map((r) => {
+      const deposit = toFiniteNumber((r as any).deposit);
+      const withdraw = toFiniteNumber((r as any).withdraw);
+      const bonus = toFiniteNumber((r as any).bonus);
+      const tips = toFiniteNumber((r as any).tips);
+      const waive = toFiniteNumber((r as any).waive);
+      const bankAdjustment = toFiniteNumber((r as any).bankAdjustment);
+      const gameAdjustment = toFiniteNumber((r as any).gameAdjustment);
+      const balance = deposit - withdraw;
+      const winPct = deposit ? (balance / deposit) * 100 : 0;
+      return {
+        subBrandId: Number((r as any).subBrandId || 0),
+        subBrandName: (r as any).subBrandName || null,
+        depositQty: Number((r as any).depositQty || 0),
+        deposit,
+        bonus,
+        withdrawQty: Number((r as any).withdrawQty || 0),
+        withdraw,
+        tips,
+        waive,
+        bankAdjustment,
+        gameAdjustment,
+        balance,
+        winPct,
+        playerQty: Number((r as any).playerQty || 0),
+      };
+    });
+
+    const totals = rows.reduce(
+      (a, r) => {
+        a.depositQty += r.depositQty;
+        a.deposit += r.deposit;
+        a.bonus += r.bonus;
+        a.withdrawQty += r.withdrawQty;
+        a.withdraw += r.withdraw;
+        a.tips += r.tips;
+        a.waive += r.waive;
+        a.bankAdjustment += r.bankAdjustment;
+        a.gameAdjustment += r.gameAdjustment;
+        a.balance += r.balance;
+        a.playerQty += r.playerQty;
+        return a;
+      },
+      {
+        depositQty: 0,
+        deposit: 0,
+        bonus: 0,
+        withdrawQty: 0,
+        withdraw: 0,
+        tips: 0,
+        waive: 0,
+        bankAdjustment: 0,
+        gameAdjustment: 0,
+        balance: 0,
+        playerQty: 0,
+      },
+    );
+    const payload = { generatedAt: new Date().toISOString(), rows, totals };
+    setCache(cacheKey, payload, 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    return sendSuccess(res, 'Code1', payload);
+  } catch (e) {
+    return sendError(res, 'Code9000', 500);
+  }
+};
 const filterRowsByScopePlayers = async (scope: any, rows: any[]) => {
   const usernames = Array.from(
     new Set(
@@ -170,38 +522,67 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
     const pageSizeNum = Math.min(200, Math.max(1, Number(pageSize) || 50));
     const offset = (pageNum - 1) * pageSizeNum;
 
-    const where: any = withTenancyWhere(scope, {
-      status: 'COMPLETED',
-      player_id: { [Op.ne]: null },
-      type: { [Op.in]: ['DEPOSIT', 'WITHDRAWAL'] },
-      created_at: { [Op.between]: [start, end] },
-    } as any);
-
-    if (normalizedGameId) {
-      where.game_id = normalizedGameId;
+    const query = typeof q === 'string' ? q.trim() : '';
+    const cacheKey = [
+      'player_winloss_v2',
+      scope.tenant_id,
+      scope.sub_brand_id,
+      start.toISOString(),
+      end.toISOString(),
+      normalizedGameId ?? '',
+      query || '',
+      pageNum,
+      pageSizeNum,
+    ].join(':');
+    const cached = getCache(cacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      sendSuccess(res, 'Code1', cached);
+      return;
     }
 
-    const query = typeof q === 'string' ? q.trim() : '';
+    const sqlWhereParts: string[] = [
+      't.tenant_id = :tenantId',
+      't.sub_brand_id = :subBrandId',
+      "t.status = 'COMPLETED'",
+      't.player_id IS NOT NULL',
+      "t.type IN ('DEPOSIT','WITHDRAWAL')",
+      't.created_at BETWEEN :startAt AND :endAt',
+    ];
+
+    const replacements: any = {
+      tenantId: scope.tenant_id,
+      subBrandId: scope.sub_brand_id,
+      startAt: start,
+      endAt: end,
+      limit: pageSizeNum,
+      offset,
+    };
+
+    if (normalizedGameId) {
+      sqlWhereParts.push('t.game_id = :gameId');
+      replacements.gameId = normalizedGameId;
+    }
+
     if (query) {
       const maybeId = Number(query);
       if (Number.isFinite(maybeId) && maybeId > 0) {
-        where.player_id = maybeId;
+        sqlWhereParts.push('t.player_id = :playerId');
+        replacements.playerId = maybeId;
       } else {
-        const candidates = await Player.findAll({
-          attributes: ['id'],
-          where: withTenancyWhere(scope, {
-            player_game_id: { [Op.like]: `%${query}%` },
-          } as any),
-          limit: 2000,
-        } as any);
-        const ids = (candidates as any[]).map((p) => Number(p?.id ?? null)).filter((v) => Number.isFinite(v) && v > 0);
-        if (ids.length === 0) {
-          sendSuccess(res, 'Code1', { rows: [], totalItems: 0, page: pageNum, pageSize: pageSizeNum, game: null });
-          return;
-        }
-        where.player_id = { [Op.in]: ids };
+        sqlWhereParts.push('p.player_game_id LIKE :playerGameLike');
+        replacements.playerGameLike = `%${query}%`;
       }
     }
+
+    const sqlJoin = `
+      FROM transactions t
+      LEFT JOIN players p
+        ON p.id = t.player_id
+        AND p.tenant_id = t.tenant_id
+        AND p.sub_brand_id = t.sub_brand_id
+    `;
+    const sqlWhere = `WHERE ${sqlWhereParts.join(' AND ')}`;
 
     const depositTotalExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN amount ELSE 0 END)`;
     const bonusClaimedExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN bonus ELSE 0 END)`;
@@ -209,74 +590,62 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
     const depCountExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN 1 ELSE 0 END)`;
     const wdCountExpr = `SUM(CASE WHEN type = 'WITHDRAWAL' THEN 1 ELSE 0 END)`;
 
-    const [totalItemsRaw, grouped] = await Promise.all([
-      Transaction.count({
-        where,
-        distinct: true,
-        col: 'player_id',
-      } as any),
-      Transaction.findAll({
-        attributes: [
-          'player_id',
-          [sequelize.literal(depositTotalExpr), 'total_deposit'],
-          [sequelize.literal(bonusClaimedExpr), 'bonus_claimed'],
-          [sequelize.literal(withdrawalTotalExpr), 'total_withdrawal'],
-          [sequelize.literal(depCountExpr), 'deposit_count'],
-          [sequelize.literal(wdCountExpr), 'withdraw_count'],
-        ],
-        where,
-        group: ['player_id'],
-        order: [[sequelize.literal('player_id'), 'ASC']],
-        limit: pageSizeNum,
-        offset,
-        raw: true,
-      } as any),
+    const totalsSql = `
+      SELECT
+        ${depositTotalExpr} AS total_deposit,
+        ${bonusClaimedExpr} AS bonus_claimed,
+        ${withdrawalTotalExpr} AS total_withdrawal,
+        ${depCountExpr} AS deposit_count,
+        ${wdCountExpr} AS withdraw_count
+      ${sqlJoin}
+      ${sqlWhere}
+    `;
+    const countSql = `
+      SELECT COUNT(*) AS cnt
+      FROM (
+        SELECT t.player_id
+        ${sqlJoin}
+        ${sqlWhere}
+        GROUP BY t.player_id
+      ) x
+    `;
+    const groupedSql = `
+      SELECT
+        t.player_id AS player_id,
+        MAX(p.player_game_id) AS player_game_id,
+        ${depositTotalExpr} AS total_deposit,
+        ${bonusClaimedExpr} AS bonus_claimed,
+        ${withdrawalTotalExpr} AS total_withdrawal,
+        ${depCountExpr} AS deposit_count,
+        ${wdCountExpr} AS withdraw_count
+      ${sqlJoin}
+      ${sqlWhere}
+      GROUP BY t.player_id
+      ORDER BY t.player_id ASC
+      LIMIT :limit OFFSET :offset
+    `;
+
+    const [totalItemsRows, grouped, totalsRow] = await Promise.all([
+      sequelize.query(countSql, { replacements, type: QueryTypes.SELECT }),
+      sequelize.query(groupedSql, { replacements, type: QueryTypes.SELECT }),
+      sequelize.query(totalsSql, { replacements, type: QueryTypes.SELECT }),
     ]);
-    const totalItemsNum = Number(totalItemsRaw as any) || 0;
 
-    const totalsRow = (await Transaction.findOne({
-      attributes: [
-        [sequelize.literal(depositTotalExpr), 'total_deposit'],
-        [sequelize.literal(bonusClaimedExpr), 'bonus_claimed'],
-        [sequelize.literal(withdrawalTotalExpr), 'total_withdrawal'],
-        [sequelize.literal(depCountExpr), 'deposit_count'],
-        [sequelize.literal(wdCountExpr), 'withdraw_count'],
-      ],
-      where,
-      raw: true,
-    } as any)) as any;
-
-    const playerIds = (grouped as any[])
-      .map((r) => Number(r?.player_id ?? null))
-      .filter((v) => Number.isFinite(v) && v > 0);
-
-    const players = playerIds.length
-      ? await Player.findAll({
-          attributes: ['id', 'player_game_id'],
-          where: withTenancyWhere(scope, { id: { [Op.in]: playerIds } } as any),
-        } as any)
-      : [];
-
-    const playerMap = new Map<number, any>();
-    for (const p of players as any[]) {
-      const id = Number(p?.id ?? null);
-      if (!Number.isFinite(id) || id <= 0) continue;
-      playerMap.set(id, p);
-    }
+    const totalItemsNum = Array.isArray(totalItemsRows) && totalItemsRows[0] ? Number((totalItemsRows[0] as any).cnt || 0) : 0;
+    const totalsRowObj = Array.isArray(totalsRow) && totalsRow[0] ? (totalsRow[0] as any) : {};
 
     const rows = (grouped as any[]).map((r) => {
-      const playerId = Number(r?.player_id ?? null);
-      const player = playerMap.get(playerId);
-      const totalDeposit = toFiniteNumber(r?.total_deposit);
-      const bonusClaimed = toFiniteNumber(r?.bonus_claimed);
-      const totalWithdrawal = toFiniteNumber(r?.total_withdrawal);
+      const playerId = Number((r as any)?.player_id ?? null);
+      const totalDeposit = toFiniteNumber((r as any)?.total_deposit);
+      const bonusClaimed = toFiniteNumber((r as any)?.bonus_claimed);
+      const totalWithdrawal = toFiniteNumber((r as any)?.total_withdrawal);
       const totalWinLoss = totalDeposit - totalWithdrawal;
       return {
         player_id: playerId,
-        player_game_id: player?.player_game_id ?? null,
-        deposit_count: Number(r?.deposit_count ?? 0) || 0,
+        player_game_id: (r as any)?.player_game_id ?? null,
+        deposit_count: Number((r as any)?.deposit_count ?? 0) || 0,
         total_deposit: totalDeposit,
-        withdraw_count: Number(r?.withdraw_count ?? 0) || 0,
+        withdraw_count: Number((r as any)?.withdraw_count ?? 0) || 0,
         total_withdrawal: totalWithdrawal,
         total_winloss: totalWinLoss,
         bonus_claimed: bonusClaimed,
@@ -284,13 +653,13 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       };
     });
 
-    const totalsTotalDeposit = toFiniteNumber(totalsRow?.total_deposit);
-    const totalsBonusClaimed = toFiniteNumber(totalsRow?.bonus_claimed);
-    const totalsTotalWithdrawal = toFiniteNumber(totalsRow?.total_withdrawal);
+    const totalsTotalDeposit = toFiniteNumber(totalsRowObj?.total_deposit);
+    const totalsBonusClaimed = toFiniteNumber(totalsRowObj?.bonus_claimed);
+    const totalsTotalWithdrawal = toFiniteNumber(totalsRowObj?.total_withdrawal);
     const totals = {
-      deposit_count: Number(totalsRow?.deposit_count ?? 0) || 0,
+      deposit_count: Number(totalsRowObj?.deposit_count ?? 0) || 0,
       total_deposit: totalsTotalDeposit,
-      withdraw_count: Number(totalsRow?.withdraw_count ?? 0) || 0,
+      withdraw_count: Number(totalsRowObj?.withdraw_count ?? 0) || 0,
       total_withdrawal: totalsTotalWithdrawal,
       total_winloss: totalsTotalDeposit - totalsTotalWithdrawal,
       bonus_claimed: totalsBonusClaimed,
@@ -312,15 +681,37 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       turnoverSupported = true;
       const usernames = rows.map((r) => String(r.player_game_id ?? '')).filter((s) => s.length > 0);
       const turnoverByUsername = new Map<string, number>();
-      for (const u of usernames) {
-        if (turnoverByUsername.has(u)) continue;
-        try {
-          const t = await sumJokerTurnover(service as any, start, end, u);
-          turnoverByUsername.set(u, t);
-        } catch {
-          turnoverByUsername.set(u, 0);
-        }
-      }
+      const unique = Array.from(new Set(usernames));
+      const runQueue = async (items: string[], concurrency: number) => {
+        let idx = 0;
+        const next = async (u: string) => {
+          const perKey = ['turnover_v1', scope.tenant_id, scope.sub_brand_id, normalizedGameId ?? '', start.toISOString(), end.toISOString(), u].join(':');
+          const cachedTurnover = getCache(perKey);
+          if (typeof cachedTurnover === 'number') {
+            turnoverByUsername.set(u, cachedTurnover);
+            return;
+          }
+          try {
+            const t = await sumJokerTurnover(service as any, start, end, u);
+            turnoverByUsername.set(u, t);
+            setCache(perKey, t, 60);
+          } catch {
+            turnoverByUsername.set(u, 0);
+          }
+        };
+        const worker = async () => {
+          for (;;) {
+            const i = idx++;
+            if (i >= items.length) return;
+            const u = items[i];
+            if (turnoverByUsername.has(u)) continue;
+            await next(u);
+          }
+        };
+        const n = Math.max(1, Math.min(concurrency, items.length));
+        await Promise.all(Array.from({ length: n }, () => worker()));
+      };
+      await runQueue(unique, 5);
       for (const r of rows as any[]) {
         const u = String(r.player_game_id ?? '');
         if (!u) continue;
@@ -332,24 +723,16 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       const maxPlayersForGrand = 200;
       const maxApiCalls = 300;
       if (totalItemsNum > 0 && totalItemsNum <= maxPlayersForGrand && totalItemsNum * chunks <= maxApiCalls) {
-        const allGrouped = await Transaction.findAll({
-          attributes: ['player_id'],
-          where,
-          group: ['player_id'],
-          raw: true,
-          limit: totalItemsNum || undefined,
-        } as any);
-        const allPlayerIds = (allGrouped as any[])
-          .map((x) => Number(x?.player_id ?? null))
-          .filter((v) => Number.isFinite(v) && v > 0);
-        const allPlayers = allPlayerIds.length
-          ? await Player.findAll({
-              attributes: ['id', 'player_game_id'],
-              where: withTenancyWhere(scope, { id: { [Op.in]: allPlayerIds } } as any),
-            } as any)
-          : [];
-        const allUsernames = (allPlayers as any[])
-          .map((p) => String(p?.player_game_id ?? '').trim())
+        const allUsersSql = `
+          SELECT DISTINCT p.player_game_id AS player_game_id
+          ${sqlJoin}
+          ${sqlWhere}
+          AND p.player_game_id IS NOT NULL
+          LIMIT ${maxPlayersForGrand}
+        `;
+        const allUserRows = await sequelize.query(allUsersSql, { replacements, type: QueryTypes.SELECT });
+        const allUsernames = (allUserRows as any[])
+          .map((x) => String((x as any)?.player_game_id ?? '').trim())
           .filter((s) => s.length > 0);
         let grandTurnover = 0;
         const seen = new Set<string>();
@@ -357,7 +740,15 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
           if (seen.has(u)) continue;
           seen.add(u);
           try {
-            grandTurnover += await sumJokerTurnover(service as any, start, end, u);
+            const perKey = ['turnover_v1', scope.tenant_id, scope.sub_brand_id, normalizedGameId ?? '', start.toISOString(), end.toISOString(), u].join(':');
+            const cachedTurnover = getCache(perKey);
+            if (typeof cachedTurnover === 'number') {
+              grandTurnover += cachedTurnover;
+              continue;
+            }
+            const v = await sumJokerTurnover(service as any, start, end, u);
+            setCache(perKey, v, 60);
+            grandTurnover += v;
           } catch {
           }
         }
@@ -365,7 +756,7 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       }
     }
 
-    sendSuccess(res, 'Code1', {
+    const payload = {
       rows,
       totalItems: totalItemsNum,
       page: pageNum,
@@ -373,7 +764,10 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       game,
       totals,
       turnoverSupported,
-    });
+    };
+    setCache(cacheKey, payload, 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    sendSuccess(res, 'Code1', payload);
   } catch (err: any) {
     sendError(res, 'Code9000', 500, { detail: err?.original?.sqlMessage ?? err?.message ?? 'Failed to get report' });
   }
@@ -408,6 +802,21 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
     const gid = gameId != null && String(gameId).trim().length > 0 ? Number(gameId) : null;
     const normalizedGameId = gid && Number.isFinite(gid) && gid > 0 ? gid : null;
     const uname = typeof username === 'string' ? username.trim() : '';
+    const gameLogCacheKey = [
+      'player_game_log_v1',
+      scope.tenant_id,
+      scope.sub_brand_id,
+      start.toISOString(),
+      end.toISOString(),
+      normalizedGameId ?? '',
+      uname || '',
+    ].join(':');
+    const cached = getCache(gameLogCacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      sendSuccess(res, 'Code1', cached);
+      return;
+    }
 
     const mkWindowEnd = (ws: Date) => {
       const ms = ws.getTime() + 24 * 60 * 60 * 1000;
@@ -730,11 +1139,14 @@ export const getPlayerGameLogReport = async (req: AuthRequest, res: Response): P
       { tenant_id: (scope as any)?.tenant_id ?? null, sub_brand_id: (scope as any)?.sub_brand_id ?? null },
     );
 
-    sendSuccess(res, 'Code1', {
+    const payload = {
       username: uname || null,
       rows: filteredRows,
       hasMore,
-    });
+    };
+    setCache(gameLogCacheKey, payload, 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    sendSuccess(res, 'Code1', payload);
   } catch (err: any) {
     sendError(res, 'Code9000', 500, { detail: err?.original?.sqlMessage ?? err?.message ?? 'Failed to get report' });
   }
@@ -759,6 +1171,13 @@ export const getPlayerGameLogHistoryUrl = async (req: AuthRequest, res: Response
     }
 
     const lang = typeof language === 'string' && language.trim().length > 0 ? language.trim() : 'en';
+    const urlCacheKey = ['game_log_url_v1', scope.tenant_id, scope.sub_brand_id, normalizedGameId ?? '', lang, o].join(':');
+    const cachedUrl = getCache(urlCacheKey);
+    if (cachedUrl && typeof cachedUrl === 'string') {
+      res.setHeader('Cache-Control', 'private, max-age=60');
+      sendSuccess(res, 'Code1', { url: cachedUrl });
+      return;
+    }
 
     await logAudit(
       req.user?.id ?? null,
@@ -778,7 +1197,12 @@ export const getPlayerGameLogHistoryUrl = async (req: AuthRequest, res: Response
       sendError(res, 'Code9000', 500, { detail: resp?.error || resp?.message || 'Failed to get history url' });
       return;
     }
-    sendSuccess(res, 'Code1', { url: resp?.url ?? null });
+    const url = typeof resp?.url === 'string' ? resp.url : '';
+    if (url) {
+      setCache(urlCacheKey, url, 60);
+    }
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    sendSuccess(res, 'Code1', { url: url || null });
   } catch (err: any) {
     sendError(res, 'Code9000', 500, { detail: err?.original?.sqlMessage ?? err?.message ?? 'Failed to get history url' });
   }

@@ -27,6 +27,7 @@ const PERMISSIONS = [
   { slug: 'route:users', description: 'Access User Management' },
   { slug: 'route:settings', description: 'Access Settings' },
   { slug: 'route:marketing', description: 'Access Marketing' },
+  { slug: 'route:reports:subbrand_winloss', description: 'Access Subbrand Win/Loss Report' },
 
   // --- Views ---
   { slug: 'view:bank_balance', description: 'View Bank Balances' },

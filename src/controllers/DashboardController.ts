@@ -1,11 +1,12 @@
 import { Response } from 'express';
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import { AuthRequest } from '../middleware/auth';
 import { BankAccount, Player, Transaction, User, Game, BankCatalog, Role } from '../models';
 import { getCache, setCache } from '../services/CacheService';
 import { decrypt, isEncrypted } from '../utils/encryption';
 import { sendSuccess, sendError } from '../utils/response';
 import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
+import sequelize from '../config/database';
 
 export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
   try {
@@ -28,36 +29,145 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
     const canViewProfit = permissions.includes('view:player_profit');
     const canViewFinancials = permissions.includes('view:dashboard_financials');
 
-    const [banksResult, playersResult, transactionsResult, gamesResult, bankCatalogResult] = await Promise.allSettled([
-      BankAccount.findAll({ where: withTenancyWhere(tenancy) } as any),
-      Player.findAll({
-        attributes: ['id', 'player_game_id', 'createdAt'],
-        where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startOfDay, endOfDay] } }),
-      } as any),
-      Transaction.findAll({
-        where: withTenancyWhere(tenancy, { created_at: { [Op.between]: [startOfDay, endOfDay] } }),
-        include: [
-          { model: BankAccount, required: false, where: withTenancyWhere(tenancy) as any },
-          { model: Player, required: false, where: withTenancyWhere(tenancy) as any },
-          { model: Game, required: false, where: withTenancyWhere(tenancy) as any },
-          { model: User, as: 'operator', attributes: ['id', 'username', 'full_name'] },
-        ],
-        order: [['created_at', 'DESC']],
-        limit: 500,
-      } as any),
-      Game.findAll({
-        where: withTenancyWhere(tenancy, { status: 'active' }),
-      } as any),
-      BankCatalog.findAll({
-        order: [['name', 'ASC']]
-      }),
-    ]);
+    const [banksResult, gamesResult, bankCatalogResult, statsRow, newPlayersRow, newPlayersWithDepRow, bankAggRows, gameAggRows, staffRows] =
+      await Promise.all([
+        BankAccount.findAll({ where: withTenancyWhere(tenancy) } as any),
+        Game.findAll({ where: withTenancyWhere(tenancy, { status: 'active' }) } as any),
+        BankCatalog.findAll({ order: [['name', 'ASC']] }),
+        sequelize.query(
+          `
+          SELECT
+            SUM(CASE WHEN type='DEPOSIT' AND status='COMPLETED' THEN amount ELSE 0 END) AS totalDeposits,
+            SUM(CASE WHEN type='WITHDRAWAL' AND status='COMPLETED' THEN amount ELSE 0 END) AS totalWithdrawals,
+            SUM(CASE WHEN type='DEPOSIT' THEN bonus ELSE 0 END) 
+              + SUM(CASE WHEN type='WALVE' THEN walve ELSE 0 END) AS totalBonus,
+            SUM(CASE WHEN type='DEPOSIT' AND status='COMPLETED' THEN 1 ELSE 0 END) AS depositCount,
+            SUM(CASE WHEN type='WITHDRAWAL' AND status='COMPLETED' THEN 1 ELSE 0 END) AS withdrawalCount,
+            SUM(CASE WHEN type IN ('DEPOSIT','WITHDRAWAL') THEN 1 ELSE 0 END) AS totalCount,
+            COUNT(DISTINCT CASE WHEN player_id IS NOT NULL THEN player_id END) AS activePlayers
+          FROM transactions
+          WHERE tenant_id=:tenantId AND sub_brand_id=:subBrandId
+            AND created_at BETWEEN :startAt AND :endAt
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        sequelize.query(
+          `
+          SELECT COUNT(*) AS cnt
+          FROM players
+          WHERE tenant_id=:tenantId AND sub_brand_id=:subBrandId
+            AND createdAt BETWEEN :startAt AND :endAt
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        sequelize.query(
+          `
+          SELECT COUNT(DISTINCT p.id) AS cnt
+          FROM players p
+          JOIN transactions t
+            ON t.player_id = p.id
+            AND t.tenant_id = p.tenant_id
+            AND t.sub_brand_id = p.sub_brand_id
+          WHERE p.tenant_id=:tenantId AND p.sub_brand_id=:subBrandId
+            AND p.createdAt BETWEEN :startAt AND :endAt
+            AND t.type='DEPOSIT' AND t.status='COMPLETED'
+            AND t.created_at BETWEEN :startAt AND :endAt
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        sequelize.query(
+          `
+          SELECT
+            bank_account_id AS bankId,
+            SUM(CASE WHEN type='DEPOSIT' AND status='COMPLETED' THEN amount ELSE 0 END) AS depAmt,
+            SUM(CASE WHEN type='DEPOSIT' AND status='COMPLETED' THEN 1 ELSE 0 END) AS depCnt,
+            SUM(
+              CASE 
+                WHEN status='COMPLETED' AND type='WITHDRAWAL' THEN amount + walve + tips
+                WHEN status='COMPLETED' AND type='WALVE' THEN walve
+                ELSE 0
+              END
+            ) AS wdAmt,
+            SUM(CASE WHEN status='COMPLETED' AND type IN ('WITHDRAWAL','WALVE') THEN 1 ELSE 0 END) AS wdCnt
+          FROM transactions
+          WHERE tenant_id=:tenantId AND sub_brand_id=:subBrandId
+            AND created_at BETWEEN :startAt AND :endAt
+          GROUP BY bank_account_id
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        sequelize.query(
+          `
+          SELECT
+            game_id AS gameId,
+            SUM(
+              CASE 
+                WHEN status='COMPLETED' AND type='DEPOSIT' THEN amount + bonus 
+                ELSE 0
+              END
+            ) AS depAmt,
+            SUM(CASE WHEN status='COMPLETED' AND type='DEPOSIT' THEN 1 ELSE 0 END) AS depCnt,
+            SUM(
+              CASE 
+                WHEN status='COMPLETED' AND type='WITHDRAWAL' THEN amount + walve + tips
+                WHEN status='COMPLETED' AND type='WALVE' THEN walve
+                ELSE 0
+              END
+            ) AS wdAmt,
+            SUM(CASE WHEN status='COMPLETED' AND type IN ('WITHDRAWAL','WALVE') THEN 1 ELSE 0 END) AS wdCnt
+          FROM transactions
+          WHERE tenant_id=:tenantId AND sub_brand_id=:subBrandId
+            AND created_at BETWEEN :startAt AND :endAt
+          GROUP BY game_id
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        sequelize.query(
+          `
+          SELECT 
+            t.operator_id AS operatorId,
+            u.full_name AS fullName,
+            u.username AS username,
+            COUNT(*) AS txCount,
+            SUM(
+              CASE 
+                WHEN t.status='COMPLETED' AND t.type='DEPOSIT' THEN t.amount + t.bonus
+                WHEN t.status='COMPLETED' AND t.type='WITHDRAWAL' THEN t.amount + t.walve + t.tips
+                WHEN t.status='COMPLETED' AND t.type='WALVE' THEN t.walve
+                ELSE 0
+              END
+            ) AS volume
+          FROM transactions t
+          LEFT JOIN users u ON u.id = t.operator_id
+          WHERE t.tenant_id=:tenantId AND t.sub_brand_id=:subBrandId
+            AND t.created_at BETWEEN :startAt AND :endAt
+          GROUP BY t.operator_id, u.full_name, u.username
+          `,
+          {
+            replacements: { tenantId: tenancy.tenant_id, subBrandId: tenancy.sub_brand_id, startAt: startOfDay, endAt: endOfDay },
+            type: QueryTypes.SELECT,
+          },
+        ),
+      ]);
 
-    const banksRaw = banksResult.status === 'fulfilled' ? banksResult.value : [];
-    const playersRaw = playersResult.status === 'fulfilled' ? playersResult.value : [];
-    const transactionsRaw = transactionsResult.status === 'fulfilled' ? transactionsResult.value : [];
-    const gamesRaw = gamesResult.status === 'fulfilled' ? gamesResult.value : [];
-    const bankCatalogRaw = bankCatalogResult.status === 'fulfilled' ? bankCatalogResult.value : [];
+    const banksRaw = banksResult as any[];
+    const gamesRaw = gamesResult as any[];
+    const bankCatalogRaw = bankCatalogResult as any[];
 
     // Create bank catalog map for icon lookup (case-insensitive and trimmed)
     const bankCatalogMap = new Map<string, string | null>();
@@ -103,76 +213,21 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         return acc;
       });
 
-    const players = (playersRaw as any[]).map(player => {
-      const p = player.toJSON();
-      const createdAt = p.createdAt || p.created_at;
-      return {
-        id: p.id,
-        player_game_id: p.player_game_id,
-        createdAt,
-      };
-    });
+    const statsBase = Array.isArray(statsRow) && statsRow[0] ? statsRow[0] as any : {};
+    const newPlayersToday = Array.isArray(newPlayersRow) && newPlayersRow[0] ? Number((newPlayersRow[0] as any).cnt || 0) : 0;
+    const newPlayersWithDeposit = Array.isArray(newPlayersWithDepRow) && newPlayersWithDepRow[0] ? Number((newPlayersWithDepRow[0] as any).cnt || 0) : 0;
 
-    const transactions = (transactionsRaw as any[]).map(tx => {
-      const json = tx.toJSON();
-
-      if (json.created_at && !json.createdAt) {
-        json.createdAt = json.created_at;
-      }
-
-      const bankAccountId = json.bank_account_id ?? null;
-      const playerId = json.player_id ?? null;
-      let operatorName: string | null = null;
-      if (json.operator) {
-        const rawFullName =
-          typeof json.operator.full_name === 'string' && json.operator.full_name.trim().length > 0
-            ? json.operator.full_name.trim()
-            : null;
-        const rawUsername =
-            typeof json.operator.username === 'string' && json.operator.username.trim().length > 0
-              ? json.operator.username.trim()
-              : 'Staff';
-
-        if (rawFullName) {
-          if (isEncrypted(rawFullName)) {
-            const decrypted = decrypt(rawFullName);
-            operatorName = decrypted !== rawFullName ? decrypted : rawUsername;
-          } else {
-            operatorName = rawFullName;
-          }
-        } else {
-          operatorName = rawUsername;
-        }
-      }
-      operatorName = operatorName || 'Staff';
-      const gameRel = json.Game || json.Player?.Game || null;
-      const gameId = json.game_id ?? gameRel?.id ?? null;
-      const gameName = gameRel?.name || null;
-      const playerGameId = json.Player?.player_game_id || null;
-
-      const amount = json.amount != null ? Number(json.amount) : 0;
-      const bonus = json.bonus != null ? Number(json.bonus) : 0;
-      const tips = json.tips != null ? Number(json.tips) : 0;
-      const walve = json.walve != null ? Number(json.walve) : 0;
-
-      return {
-        id: json.id,
-        transactionId: String(json.id),
-        date: json.createdAt,
-        type: json.type,
-        amount,
-        bonus,
-        tips,
-        walve,
-        bankAccountId,
-        playerId,
-        operatorName,
-        gameId,
-        gameName,
-        playerGameId,
-        status: json.status,
-      };
-    });
+    const bankAggMap = new Map<number, { depositsAmount: number; depositsCount: number; withdrawalsAmount: number; withdrawalsCount: number }>();
+    for (const r of (bankAggRows as any[])) {
+      const bankId = Number(r.bankId ?? 0);
+      if (!Number.isFinite(bankId) || bankId <= 0) continue;
+      bankAggMap.set(bankId, {
+        depositsAmount: Number(r.depAmt || 0),
+        depositsCount: Number(r.depCnt || 0),
+        withdrawalsAmount: Number(r.wdAmt || 0),
+        withdrawalsCount: Number(r.wdCnt || 0),
+      });
+    }
 
     const games = (gamesRaw as any[])
       .filter((game: any) => {
@@ -192,134 +247,60 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         };
       });
 
-    const stats = {
-      activePlayersToday: 0,
-      newPlayersToday: players.length,
-      newPlayersWithDeposit: 0,
-      totalDeposits: 0,
-      totalWithdrawals: 0,
-      netCashFlow: 0,
-      depositCount: 0,
-      withdrawalCount: 0,
-      totalCount: 0,
-      totalBonus: 0,
-    };
+    const gameAggMap = new Map<number, { depositsAmount: number; depositsCount: number; withdrawalsAmount: number; withdrawalsCount: number }>();
+    for (const r of (gameAggRows as any[])) {
+      const gameId = Number(r.gameId ?? 0);
+      if (!Number.isFinite(gameId) || gameId <= 0) continue;
+      gameAggMap.set(gameId, {
+        depositsAmount: Number(r.depAmt || 0),
+        depositsCount: Number(r.depCnt || 0),
+        withdrawalsAmount: Number(r.wdAmt || 0),
+        withdrawalsCount: Number(r.wdCnt || 0),
+      });
+    }
 
-    const activePlayerIds = new Set<number>();
-    const depositPlayerIds = new Set<number>();
-
-    const bankAgg = new Map<number, { depositsAmount: number; depositsCount: number; withdrawalsAmount: number; withdrawalsCount: number }>();
-    const gameAgg = new Map<number, { depositsAmount: number; depositsCount: number; withdrawalsAmount: number; withdrawalsCount: number }>();
     const staffMap = new Map<string, { operatorName: string; initials: string; txCount: number; volume: number }>();
+    for (const r of (staffRows as any[])) {
+      const operatorId = Number((r as any).operatorId ?? null);
+      const rawFullName = typeof (r as any).fullName === 'string' ? String((r as any).fullName).trim() : '';
+      const rawUsername = typeof (r as any).username === 'string' ? String((r as any).username).trim() : '';
 
-    transactions.forEach(t => {
-      const amount = t.amount != null ? Number(t.amount) : 0;
-      const bonus = t.bonus != null ? Number(t.bonus) : 0;
-      const tips = t.tips != null ? Number(t.tips) : 0;
-      const walve = t.walve != null ? Number(t.walve) : 0;
-      const type = String(t.type || '').toUpperCase();
-      const isDeposit = type === 'DEPOSIT';
-      const isWithdrawal = type === 'WITHDRAWAL';
-      const isCompleted = t.status === 'COMPLETED';
-
-      if (t.playerId != null) {
-        activePlayerIds.add(t.playerId);
-      }
-      if (isDeposit && t.playerId != null) {
-        depositPlayerIds.add(t.playerId);
-      }
-
-      if (isDeposit || isWithdrawal) {
-        stats.totalCount += 1;
-      }
-
-      // 统计所有 bonus/walve（不论状态，用于 Funds flow 计算）
-      if (isDeposit) {
-        stats.totalBonus += bonus;
-      } else if (type === 'WALVE') {
-        stats.totalBonus += walve;
-      }
-
-      // 只计算成功状态的交易金额
-      if (isCompleted) {
-        if (isDeposit) {
-          stats.totalDeposits += amount;  // 不包含 bonus
-          stats.depositCount += 1;
-        } else if (isWithdrawal) {
-          stats.totalWithdrawals += amount;
-          stats.withdrawalCount += 1;
+      let operatorName: string | null = rawFullName || null;
+      if (operatorName) {
+        if (isEncrypted(operatorName)) {
+          const dec = decrypt(operatorName);
+          operatorName = dec !== operatorName ? dec : (rawUsername || null);
         }
+      } else if (rawUsername) {
+        operatorName = isEncrypted(rawUsername) ? decrypt(rawUsername) : rawUsername;
       }
+      operatorName = operatorName || 'Staff';
 
-      if (t.bankAccountId != null && isCompleted) {
-        const current = bankAgg.get(t.bankAccountId) || {
-          depositsAmount: 0,
-          depositsCount: 0,
-          withdrawalsAmount: 0,
-          withdrawalsCount: 0,
-        };
-        if (isDeposit) {
-          current.depositsAmount += amount;
-          current.depositsCount += 1;
-        } else if (isWithdrawal) {
-          current.withdrawalsAmount += amount;
-          current.withdrawalsCount += 1;
-        }
-        bankAgg.set(t.bankAccountId, current);
-      }
-
-      if (t.gameId != null && isCompleted) {
-        const current = gameAgg.get(t.gameId) || {
-          depositsAmount: 0,
-          depositsCount: 0,
-          withdrawalsAmount: 0,
-          withdrawalsCount: 0,
-        };
-        if (isDeposit) {
-          current.depositsAmount += amount + bonus;  // 存款包含 bonus
-          current.depositsCount += 1;
-        } else if (isWithdrawal) {
-          current.withdrawalsAmount += amount + walve + tips;  // 取款包含 walve + tips
-          current.withdrawalsCount += 1;
-        } else if (type === 'WALVE') {
-          // WALVE 单独加到取款金额
-          current.withdrawalsAmount += walve;
-          current.withdrawalsCount += 1;
-        }
-        gameAgg.set(t.gameId, current);
-      }
-
-      const operatorName = t.operatorName || 'Staff';
-      const existing = staffMap.get(operatorName) || {
+      const key = Number.isFinite(operatorId) && operatorId > 0 ? String(operatorId) : operatorName;
+      staffMap.set(key, {
         operatorName,
         initials: operatorName.slice(0, 2).toUpperCase(),
-        txCount: 0,
-        volume: 0,
-      };
-      existing.txCount += 1;
+        txCount: Number((r as any).txCount || 0),
+        volume: Number((r as any).volume || 0),
+      });
+    }
 
-      // Staff volume 只计算成功状态，跟 Game 报告一样
-      if (isCompleted) {
-        if (isDeposit) {
-          existing.volume += amount + bonus;  // 存款包含 bonus
-        } else if (isWithdrawal) {
-          existing.volume += amount + walve + tips;  // 取款包含 walve + tips
-        } else if (type === 'WALVE') {
-          existing.volume += walve;
-        }
-      }
+    const stats = {
+      activePlayersToday: Number(statsBase.activePlayers || 0),
+      newPlayersToday,
+      newPlayersWithDeposit,
+      totalDeposits: Number(statsBase.totalDeposits || 0),
+      totalWithdrawals: Number(statsBase.totalWithdrawals || 0),
+      netCashFlow: Number(statsBase.totalDeposits || 0) - Number(statsBase.totalWithdrawals || 0) - Number(statsBase.totalBonus || 0),
+      depositCount: Number(statsBase.depositCount || 0),
+      withdrawalCount: Number(statsBase.withdrawalCount || 0),
+      totalCount: Number(statsBase.totalCount || 0),
+      totalBonus: Number(statsBase.totalBonus || 0),
+    };
 
-      staffMap.set(operatorName, existing);
-    });
-
-    stats.activePlayersToday = activePlayerIds.size;
-    stats.newPlayersWithDeposit = players.filter(p => depositPlayerIds.has(p.id)).length;
-    // Funds flow = Total deposits - Total withdrawals - Bonus
-    stats.netCashFlow = stats.totalDeposits - stats.totalWithdrawals - stats.totalBonus;
-
-    const bankReports = banks.map((bank: any) => {
+    const bankReports = (banks as any[]).map((bank: any) => {
       const bankId = bank.id;
-      const agg = bankAgg.get(bankId) || {
+      const agg = bankAggMap.get(bankId) || {
         depositsAmount: 0,
         depositsCount: 0,
         withdrawalsAmount: 0,
@@ -343,9 +324,9 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       };
     });
 
-    const kioskReports = games.map((g) => {
+    const kioskReports = (games as any[]).map((g: any) => {
       const agg =
-        gameAgg.get(g.id) || {
+        gameAggMap.get(g.id) || {
           depositsAmount: 0,
           depositsCount: 0,
           withdrawalsAmount: 0,
@@ -437,11 +418,11 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       staffPerformance,
       subBrandOptions,
       partialErrors: {
-        banks: banksResult.status === 'rejected',
-        players: playersResult.status === 'rejected',
-        transactions: transactionsResult.status === 'rejected',
-        games: gamesResult.status === 'rejected',
-        bankCatalog: bankCatalogResult.status === 'rejected',
+        banks: false,
+        players: false,
+        transactions: false,
+        games: false,
+        bankCatalog: false,
       },
     };
 

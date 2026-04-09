@@ -514,11 +514,11 @@ export const adjustBalance = async (req: AuthRequest, res: Response) => {
     if (adjustmentAmount < 0) {
       const reserved = Number(
         (await Transaction.sum('amount', {
-          where: {
+          where: withTenancyWhere(scope, {
             status: 'PENDING',
             type: 'WITHDRAWAL',
             bank_account_id: (account as any).id,
-          },
+          }),
           transaction: t,
         } as any)) || 0,
       );
@@ -535,22 +535,25 @@ export const adjustBalance = async (req: AuthRequest, res: Response) => {
 
     // Create Adjustment Transaction
     // @ts-ignore
-    await Transaction.create({
-      bank_account_id: account.id,
-      operator_id: req.user.id,
-      type: 'ADJUSTMENT',
-      amount: adjustmentAmount, // Store signed amount
-      bonus: 0,
-      tips: 0,
-      walve: 0,
-      status: 'COMPLETED',
-      remark: reason || 'Manual Adjustment',
-      ip_address: clientIp,
-      player_id: null,
-      bank_balance_after: newBalance,
-      // Bank Adjustment 与 Game 无关，为避免旧表 NOT NULL 约束，写 0
-      game_balance_after: 0,
-    }, { transaction: t });
+    await Transaction.create(
+      withTenancyCreate(scope, {
+        bank_account_id: account.id,
+        operator_id: req.user.id,
+        type: 'ADJUSTMENT',
+        amount: adjustmentAmount, // Store signed amount
+        bonus: 0,
+        tips: 0,
+        walve: 0,
+        status: 'COMPLETED',
+        remark: reason || 'Manual Adjustment',
+        ip_address: clientIp,
+        player_id: null,
+        bank_balance_after: newBalance,
+        // Bank Adjustment 与 Game 无关，为避免旧表 NOT NULL 约束，写 0
+        game_balance_after: 0,
+      }),
+      { transaction: t } as any,
+    );
 
     await t.commit();
     
@@ -584,6 +587,7 @@ export const adjustBalance = async (req: AuthRequest, res: Response) => {
 
 export const getBankActivity = async (req: AuthRequest, res: Response) => {
   try {
+    const scope = getTenancyScopeOrThrow(req);
     const { id } = req.params;
     const bankId = Number(id);
     if (Number.isNaN(bankId)) {
@@ -596,7 +600,7 @@ export const getBankActivity = async (req: AuthRequest, res: Response) => {
     const canViewSensitive = userPermissions.includes('view:sensitive_logs');
 
     const transactions = await Transaction.findAll({
-      where: { bank_account_id: bankId },
+      where: withTenancyWhere(scope, { bank_account_id: bankId } as any),
       include: [
         { model: BankAccount },
         { model: Player },

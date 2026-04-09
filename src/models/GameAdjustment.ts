@@ -73,8 +73,8 @@ GameAdjustment.init({
   tableName: 'game_adjustments',
   indexes: [
     { fields: ['tenant_id', 'sub_brand_id'] },
-    { fields: ['sub_brand_id', 'createdAt'] },
-    { fields: ['game_id', 'createdAt'] },
+    { fields: ['tenant_id', 'sub_brand_id', 'createdAt'] },
+    { fields: ['tenant_id', 'sub_brand_id', 'game_id', 'createdAt'] },
   ],
   hooks: {
     beforeCreate: (instance: GameAdjustment) => {

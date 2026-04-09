@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -23,6 +23,7 @@
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
+    "compression": "^1.7.5",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
@@ -43,6 +44,7 @@
     "@types/bcryptjs": "^2.4.6",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
+    "@types/compression": "^1.7.6",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.10",

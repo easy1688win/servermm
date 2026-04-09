@@ -7,6 +7,7 @@ import { decrypt, encrypt, isEncrypted } from '../utils/encryption';
 import { VendorFieldDef, getVendorFieldDefsFromKeys, isAllowedVendorFieldKey } from '../vendors/vendorFieldRegistry';
 import { sendSuccess, sendError } from '../utils/response';
 import { getTenancyScopeOrThrow, withTenancyCreate, withTenancyWhere } from '../tenancy/scope';
+import { getCache, setCache } from '../services/CacheService';
 
 const isValidUrl = (url: string): boolean => {
   if (!url) return true; // Allow empty/null URLs
@@ -225,83 +226,162 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
     await ensureGamesSynced();
     const userPermissions = req.user?.permissions || [];
     const canViewGames = (userPermissions as string[]).includes('view:games');
+    const includeMetaRaw =
+      (req.query.includeMeta as string | undefined) ??
+      (req.query.include_meta as string | undefined) ??
+      null;
+    const includeMeta =
+      includeMetaRaw == null
+        ? true
+        : !['0', 'false', 'no'].includes(includeMetaRaw.trim().toLowerCase());
+
+    const requesterId = req.user?.id ?? null;
+    const baseCacheKey = ['games_context_v2', scope.tenant_id, scope.sub_brand_id, includeMeta ? 'm1' : 'm0', canViewGames ? 'b1' : 'b0'].join(':');
+    const cached = getCache(baseCacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      sendSuccess(res, 'Code1', cached);
+      return;
+    }
+
     const [games, products] = await Promise.all([
       Game.findAll({
+        attributes: ['id', 'name', 'icon', 'status', 'balance', 'kioskUrl', 'kioskUsername', 'kioskPassword', 'product_id', 'use_api'],
         where: withTenancyWhere(scope, { status: 'active' }),
         order: [['name', 'ASC']],
-      }),
-      Product.findAll({
-        where: { status: 'active' } as any,
-        order: [['provider', 'ASC']],
-      }),
+      } as any),
+      includeMeta
+        ? Product.findAll({
+            attributes: ['id', 'provider', 'providerCode', 'vendorFields'],
+            where: { status: 'active' } as any,
+            order: [['provider', 'ASC']],
+          } as any)
+        : Promise.resolve([] as any[]),
     ]);
 
     const productMap = new Map<number, any>();
     (products as any[]).forEach((p: any) => productMap.set(p.id, p));
 
-    const formattedProducts = (products as any[]).map((p: any) => ({
-      id: p.id,
-      provider: p.provider,
-      providerCode: p.providerCode,
-      vendorFields: normalizeVendorFieldKeys(p.vendorFields),
-      icon: p.icon || null,
-      status: p.status,
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
+    const formattedProducts = includeMeta
+      ? (products as any[]).map((p: any) => ({
+          id: p.id,
+          provider: p.provider,
+          providerCode: p.providerCode,
+          vendorFields: normalizeVendorFieldKeys(p.vendorFields),
+        }))
+      : [];
+
+    const formattedGames = (games as any[]).map((g: any) => ({
+      id: g.id,
+      name: g.name,
+      icon: g.icon,
+      status: g.status,
+      balance: canViewGames ? Number(g.balance) : null,
+      kioskUrl: g.kioskUrl,
+      kioskUsername: g.kioskUsername,
+      kioskPassword: g.kioskPassword,
+      productId: (g as any).product_id || null,
+      useApi: Boolean((g as any).use_api),
     }));
 
-    const formattedGames = (games as any[]).map((g: any) => {
-      const product = g.product_id ? productMap.get(g.product_id) : null;
-      const vendorFieldKeys = product ? normalizeVendorFieldKeys(product.vendorFields) : [];
-      const vendorFields = getVendorFieldDefsFromKeys(vendorFieldKeys);
-      const maskedVendorConfig = product ? maskVendorConfigForResponse(vendorFields, g.vendor_config) : null;
-      return {
-        id: g.id,
-        name: g.name,
-        icon: g.icon,
-        status: g.status,
-        balance: canViewGames ? Number(g.balance) : null,
-        kioskUrl: g.kioskUrl,
-        kioskUsername: g.kioskUsername,
-        kioskPassword: g.kioskPassword,
-        productId: g.product_id || null,
-        vendorConfig: maskedVendorConfig,
-        useApi: Boolean(g.use_api),
-      };
-    });
-
     let subBrands: any[] = [];
-    try {
-      const requesterId = req.user?.id;
-      const requester = requesterId
-        ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
-        : null;
-      if (requester) {
-        const isSuperAdmin =
-          Boolean(req.user?.is_super_admin) ||
-          Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'super admin'));
-        const isOperator = Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'operator'));
-        if (isSuperAdmin) {
-          subBrands = await SubBrand.findAll({ order: [['id', 'ASC']] });
-        } else if (isOperator) {
-          const tid = Number((requester as any)?.tenant_id ?? null);
-          if (Number.isFinite(tid) && tid > 0) {
-            subBrands = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+    if (includeMeta) {
+      try {
+        const requester = requesterId
+          ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+          : null;
+        if (requester) {
+          const isSuperAdmin =
+            Boolean(req.user?.is_super_admin) ||
+            Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'super admin'));
+          const isOperator = Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'operator'));
+          if (isSuperAdmin) {
+            subBrands = await SubBrand.findAll({ order: [['id', 'ASC']] });
+          } else if (isOperator) {
+            const tid = Number((requester as any)?.tenant_id ?? null);
+            if (Number.isFinite(tid) && tid > 0) {
+              subBrands = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+            }
           }
         }
+      } catch {
       }
-    } catch {
     }
 
-    sendSuccess(res, 'Code1', {
+    const payload: any = {
       generatedAt: new Date().toISOString(),
       games: formattedGames,
-      products: formattedProducts,
-      subBrands,
-    });
+    };
+    if (includeMeta) {
+      payload.products = formattedProducts;
+      payload.subBrands = (subBrands as any[]).map((sb: any) => ({
+        id: sb.id,
+        tenant_id: (sb as any).tenant_id ?? null,
+        code: (sb as any).code ?? null,
+        name: (sb as any).name ?? null,
+        status: (sb as any).status ?? null,
+      }));
+    }
+
+    setCache(baseCacheKey, payload, includeMeta ? 10 : 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    sendSuccess(res, 'Code1', payload);
   } catch (error) {
-    console.error('Error fetching games context:', error);
     sendError(res, 'Code1001', 500); // Error fetching games context
+  }
+};
+
+export const getGameById = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const userPermissions = req.user?.permissions || [];
+    const canViewGames = (userPermissions as string[]).includes('view:games');
+    const idRaw = req.params.id;
+    const id = idRaw != null ? Number(idRaw) : NaN;
+    if (!Number.isFinite(id) || id <= 0) {
+      sendError(res, 'Code1008', 404);
+      return;
+    }
+
+    const cacheKey = ['game_detail_v1', scope.tenant_id, scope.sub_brand_id, id, canViewGames ? 'b1' : 'b0'].join(':');
+    const cached = getCache(cacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=10');
+      sendSuccess(res, 'Code1', cached);
+      return;
+    }
+
+    const game = await Game.findOne({ where: withTenancyWhere(scope, { id }) } as any);
+    if (!game) {
+      sendError(res, 'Code1008', 404);
+      return;
+    }
+
+    const productId = (game as any).product_id ? Number((game as any).product_id) : null;
+    const product = productId ? await Product.findByPk(productId) : null;
+    const vendorFieldKeys = product ? normalizeVendorFieldKeys((product as any).vendorFields) : [];
+    const vendorFields = getVendorFieldDefsFromKeys(vendorFieldKeys);
+    const maskedVendorConfig = product ? maskVendorConfigForResponse(vendorFields, (game as any).vendor_config) : null;
+
+    const payload = {
+      id: game.id,
+      name: game.name,
+      icon: game.icon,
+      status: game.status,
+      balance: canViewGames ? Number((game as any).balance) : null,
+      kioskUrl: (game as any).kioskUrl,
+      kioskUsername: (game as any).kioskUsername,
+      kioskPassword: (game as any).kioskPassword,
+      productId: productId || null,
+      vendorConfig: maskedVendorConfig,
+      useApi: Boolean((game as any).use_api),
+    };
+
+    setCache(cacheKey, payload, 10);
+    res.setHeader('Cache-Control', 'private, max-age=10');
+    sendSuccess(res, 'Code1', payload);
+  } catch (error) {
+    sendError(res, 'Code1000', 500);
   }
 };
 

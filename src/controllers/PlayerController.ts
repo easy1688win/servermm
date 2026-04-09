@@ -330,11 +330,27 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     if (!Number.isFinite(pageSize) || pageSize < 1) pageSize = 50;
     if (pageSize > 200) pageSize = 200;
 
+    const includeMetaRaw =
+      (req.query.includeMeta as string | undefined) ??
+      (req.query.include_meta as string | undefined) ??
+      null;
+    const includeMeta =
+      includeMetaRaw == null
+        ? true
+        : !['0', 'false', 'no'].includes(includeMetaRaw.trim().toLowerCase());
+
     const searchQuery = (req.query.q as string || '').trim();
     const searchType = (req.query.searchType as string || '').trim();
     const filterOpId = (req.query.operatorId as string || '').trim();
     const filterSource = (req.query.referralSource as string || '').trim();
     const filterTag = (req.query.tags as string || '').trim();
+
+    const normalizeDigits = (val: string) => String(val || '').replace(/\D/g, '');
+    const qLower = searchQuery.toLowerCase();
+    const qDigits = normalizeDigits(searchQuery);
+    const sourceLower = filterSource.toLowerCase();
+    const operatorIdNum =
+      filterOpId && !Number.isNaN(Number(filterOpId)) ? Number(filterOpId) : null;
 
     const createdCond: any = {};
     let hasRange = false;
@@ -357,7 +373,8 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
 
     const whereConditions: any[] = [];
 
-    if (hasRange) {
+    const shouldApplyCreatedAtRange = hasRange && !(hasTextSearch && effectiveSearchType === 'player_game_id');
+    if (shouldApplyCreatedAtRange) {
       whereConditions.push({ createdAt: createdCond });
     }
 
@@ -375,45 +392,129 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       );
     }
 
+    if (operatorIdNum != null) {
+      whereConditions.push(
+        sequelize.where(
+          sequelize.fn(
+            'JSON_UNQUOTE',
+            sequelize.fn('JSON_EXTRACT', sequelize.col('metadata'), '$.createdByUserId'),
+          ),
+          String(operatorIdNum),
+        ),
+      );
+    }
+
+    if (filterSource) {
+      whereConditions.push(
+        sequelize.where(
+          sequelize.fn(
+            'LOWER',
+            sequelize.fn(
+              'JSON_UNQUOTE',
+              sequelize.fn('JSON_EXTRACT', sequelize.col('metadata'), '$.referralSource'),
+            ),
+          ),
+          sourceLower,
+        ),
+      );
+    }
+
     if (hasTextSearch && effectiveSearchType === 'player_game_id') {
       whereConditions.push({
         player_game_id: { [Op.like]: `%${searchQuery}%` },
       });
     }
 
+    if (hasTextSearch && effectiveSearchType === 'phone') {
+      if (!qDigits) {
+        return sendSuccess(res, 'Code1', {
+          players: [],
+          pagination: { page, pageSize, totalItems: 0, totalPages: 0 },
+          ...(includeMeta ? {} : {}),
+        });
+      }
+      whereConditions.push(
+        sequelize.where(
+          sequelize.fn(
+            'JSON_UNQUOTE',
+            sequelize.fn('JSON_EXTRACT', sequelize.col('metadata'), '$.phoneNumber'),
+          ),
+          { [Op.like]: `%${qDigits}%` },
+        ),
+      );
+    }
+
+    if (hasTextSearch && effectiveSearchType === 'full_name') {
+      if (!qLower) {
+        return sendSuccess(res, 'Code1', {
+          players: [],
+          pagination: { page, pageSize, totalItems: 0, totalPages: 0 },
+          ...(includeMeta ? {} : {}),
+        });
+      }
+      whereConditions.push(
+        sequelize.where(
+          sequelize.fn(
+            'LOWER',
+            sequelize.fn(
+              'JSON_UNQUOTE',
+              sequelize.fn('JSON_EXTRACT', sequelize.col('metadata'), '$.fullName'),
+            ),
+          ),
+          { [Op.like]: `%${qLower}%` },
+        ),
+      );
+    }
+
     const finalWhere: any =
       whereConditions.length > 0 ? { [Op.and]: whereConditions } : {};
 
     const needsMetadataScan =
-      Boolean(filterOpId) ||
-      Boolean(filterSource) ||
-      (hasTextSearch &&
-        effectiveSearchType !== 'player_game_id' &&
-        effectiveSearchType !== '');
+      effectiveSearchType === 'bank_account' || effectiveSearchType === 'game_account';
 
-    const [bankCatalog, games, referralSetting, tagSetting, allOperators] = await Promise.all([
-      BankCatalog.findAll(),
-      Game.findAll({
-        attributes: ['id', 'name', 'icon', 'status', 'vendor_config'],
-        where: withTenancyWhere(scope, { status: 'active' }),
-      }),
-      getSettingValue(scope, 'referralSources'),
-      getSettingValue(scope, 'tagOptions'),
-      canViewUsers
-        ? User.findAll({
-            attributes: ['id', 'username', 'full_name'],
-            where: { tenant_id: scope.tenant_id, status: 'active' } as any,
-            order: [['username', 'ASC']],
-          } as any)
-        : [] as any[],
-    ]);
+    const listCacheKey = [
+      'pl_list_v2',
+      scope.tenant_id,
+      scope.sub_brand_id,
+      includeMeta ? 'm1' : 'm0',
+      canViewProfit ? 'p1' : 'p0',
+      canViewUsers ? 'u1' : 'u0',
+      req.user?.id ?? 0,
+      page,
+      pageSize,
+      startDateRaw || '',
+      endDateRaw || '',
+      searchQuery || '',
+      effectiveSearchType || '',
+      filterOpId || '',
+      filterSource || '',
+      filterTag || '',
+    ].join(':');
+    const cached = getCache(listCacheKey);
+    if (cached) {
+      res.setHeader('Cache-Control', 'private, max-age=3');
+      return sendSuccess(res, 'Code1', cached);
+    }
 
-    const normalizeDigits = (val: string) => String(val || '').replace(/\D/g, '');
-    const qLower = searchQuery.toLowerCase();
-    const qDigits = normalizeDigits(searchQuery);
-    const sourceLower = filterSource.toLowerCase();
-    const operatorIdNum =
-      filterOpId && !Number.isNaN(Number(filterOpId)) ? Number(filterOpId) : null;
+    const games = await Game.findAll({
+      attributes: ['id', 'name', 'icon', 'vendor_config'],
+      where: withTenancyWhere(scope, { status: 'active' }),
+    } as any);
+
+    const [bankCatalog, referralSetting, tagSetting, allOperators] = includeMeta
+      ? await Promise.all([
+          BankCatalog.findAll(),
+          getSettingValue(scope, 'referralSources'),
+          getSettingValue(scope, 'tagOptions'),
+          canViewUsers
+            ? User.findAll({
+                attributes: ['id', 'username', 'full_name'],
+                where: { tenant_id: scope.tenant_id, status: 'active' } as any,
+                order: [['username', 'ASC']],
+              } as any)
+            : ([] as any[]),
+        ])
+      : ([[] as any[], null as any, null as any, [] as any[]] as const);
 
     const sortOrder: any = [['createdAt', 'DESC']];
     const offset = (page - 1) * pageSize;
@@ -457,11 +558,6 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         }
 
         if (!hasTextSearch) return true;
-
-        if (effectiveSearchType === 'player_game_id') {
-          return true;
-        }
-
         if (effectiveSearchType === 'bank_account') {
           const banks = Array.isArray(meta.playerBanks) ? meta.playerBanks : [];
           if (!qDigits) return false;
@@ -472,16 +568,6 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
           const gamesArr = Array.isArray(meta.gameAccounts) ? meta.gameAccounts : [];
           if (!qLower) return false;
           return gamesArr.some((g: any) => String(g?.accountId || '').toLowerCase().includes(qLower));
-        }
-
-        if (effectiveSearchType === 'phone') {
-          if (!qDigits) return false;
-          return normalizeDigits(meta.phoneNumber).includes(qDigits);
-        }
-
-        if (effectiveSearchType === 'full_name') {
-          if (!qLower) return false;
-          return String(meta.fullName || '').toLowerCase().includes(qLower);
         }
 
         return false;
@@ -648,6 +734,15 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       gameAppIdByNameLower.set(name.toLowerCase(), appId);
     }
 
+    const gameIdByNameLower = new Map<string, number>();
+    for (const g of games as any[]) {
+      const name = typeof g?.name === 'string' ? g.name.trim() : '';
+      const id = Number(g?.id ?? null);
+      if (!name) continue;
+      if (!Number.isFinite(id) || id <= 0) continue;
+      gameIdByNameLower.set(name.toLowerCase(), id);
+    }
+
     const playersPayload = (pagedPlayersRaw as any[]).map((p: any) => {
       const sanitized = sanitizePlayerForResponse(p, userPermissions);
       const json = sanitized?.toJSON ? sanitized.toJSON() : { ...sanitized };
@@ -664,19 +759,10 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
       const metadata = { ...metadataRaw, createdByFullName };
       const gameAccountsRaw = Array.isArray((metadata as any).gameAccounts) ? (metadata as any).gameAccounts : [];
       if (gameAccountsRaw.length > 0) {
-        const gameIdByName = new Map<string, number>();
-        for (const g of games as any[]) {
-          const name = typeof g?.name === 'string' ? g.name.trim() : '';
-          const id = Number(g?.id ?? null);
-          if (!name) continue;
-          if (!Number.isFinite(id) || id <= 0) continue;
-          gameIdByName.set(name.toLowerCase(), id);
-        }
-
         const nextGameAccounts = gameAccountsRaw.map((ga: any) => {
           if (!ga || typeof ga !== 'object') return ga;
           const name = typeof ga.gameName === 'string' ? ga.gameName.trim().toLowerCase() : '';
-          const gid = name ? (gameIdByName.get(name) ?? null) : null;
+          const gid = name ? (gameIdByNameLower.get(name) ?? null) : null;
           if (!gid) return ga;
           const key = `${json.id}:${gid}`;
           const val = latestVendorCreditAfter.get(key);
@@ -820,50 +906,52 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
     const pagedPlayers = playersPayload;
 
     let subBrandOptions: any[] = [];
-    try {
-      const requesterId = req.user?.id;
-      const requester: any = requesterId
-        ? await User.findByPk(requesterId, {
-            attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
-            include: [{ model: Role, through: { attributes: [] }, required: false }],
-          } as any)
-        : null;
+    if (includeMeta) {
+      try {
+        const requesterId = req.user?.id;
+        const requester: any = requesterId
+          ? await User.findByPk(requesterId, {
+              attributes: ['id', 'username', 'full_name', 'tenant_id', 'sub_brand_id', 'is_super_admin'],
+              include: [{ model: Role, through: { attributes: [] }, required: false }],
+            } as any)
+          : null;
 
-      if (requester) {
-        const isSuperAdmin =
-          Boolean(req.user?.is_super_admin) ||
-          Boolean(requester?.is_super_admin) ||
-          Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
-        const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+        if (requester) {
+          const isSuperAdmin =
+            Boolean(req.user?.is_super_admin) ||
+            Boolean(requester?.is_super_admin) ||
+            Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+          const isOperator = Boolean(requester?.Roles?.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
 
-        let rows: any[] = [];
-        if (isSuperAdmin) {
-          rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
-        } else if (isOperator) {
-          const tid = Number(requester?.tenant_id ?? null);
-          if (Number.isFinite(tid) && tid > 0) {
-            rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+          let rows: any[] = [];
+          if (isSuperAdmin) {
+            rows = await SubBrand.findAll({ order: [['id', 'ASC']] });
+          } else if (isOperator) {
+            const tid = Number(requester?.tenant_id ?? null);
+            if (Number.isFinite(tid) && tid > 0) {
+              rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+            }
+          } else {
+            const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
+            if (Number.isFinite(sbid) && sbid > 0) {
+              rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
+            }
           }
-        } else {
-          const sbid = Number(req.user?.sub_brand_id ?? requester?.sub_brand_id ?? null);
-          if (Number.isFinite(sbid) && sbid > 0) {
-            rows = await SubBrand.findAll({ where: { id: sbid } as any, order: [['id', 'ASC']] });
-          }
+
+          subBrandOptions = (rows as any[]).map((sb: any) => ({
+            id: sb.id,
+            tenant_id: (sb as any).tenant_id ?? null,
+            code: (sb as any).code ?? null,
+            name: (sb as any).name ?? null,
+            status: (sb as any).status ?? null,
+          }));
         }
-
-        subBrandOptions = (rows as any[]).map((sb: any) => ({
-          id: sb.id,
-          tenant_id: (sb as any).tenant_id ?? null,
-          code: (sb as any).code ?? null,
-          name: (sb as any).name ?? null,
-          status: (sb as any).status ?? null,
-        }));
+      } catch (e) {
+        void e;
       }
-    } catch (e) {
-      void e;
     }
 
-    sendSuccess(res, 'Code1', {
+    const payload: any = {
       players: pagedPlayers,
       pagination: {
         page,
@@ -871,15 +959,22 @@ export const getPlayerList = async (req: AuthRequest, res: Response) => {
         totalItems,
         totalPages,
       },
-      bankNameOptions,
-      gameNameOptions,
-      gameIconMap,
-      bankIconMap,
-      referralSourceOptions,
-      tagOptions,
-      operatorOptions,
-      subBrandOptions,
-    });
+    };
+
+    if (includeMeta) {
+      payload.bankNameOptions = bankNameOptions;
+      payload.gameNameOptions = gameNameOptions;
+      payload.gameIconMap = gameIconMap;
+      payload.bankIconMap = bankIconMap;
+      payload.referralSourceOptions = referralSourceOptions;
+      payload.tagOptions = tagOptions;
+      payload.operatorOptions = operatorOptions;
+      payload.subBrandOptions = subBrandOptions;
+    }
+
+    setCache(listCacheKey, payload, 3);
+    res.setHeader('Cache-Control', 'private, max-age=3');
+    sendSuccess(res, 'Code1', payload);
   } catch (error) {
     sendError(res, 'Code801', 500);
   }
