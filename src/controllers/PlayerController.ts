@@ -1425,6 +1425,148 @@ export const retryCreateGameAccount = async (req: AuthRequest, res: Response): P
   }
 };
 
+export const recreateGameAccount = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const scope = getTenancyScopeOrThrow(req);
+    const includeVendorRaw = Boolean((req as any)?.user?.is_super_admin);
+    const playerId = Number(req.params.id);
+    if (!Number.isInteger(playerId) || playerId <= 0) {
+      sendError(res, 'Code804', 400);
+      return;
+    }
+
+    const gameNameRaw = (req.body?.gameName as string | undefined) || '';
+    const gameName = gameNameRaw.trim();
+    if (!gameName) {
+      sendError(res, 'Code805', 400);
+      return;
+    }
+
+    const player = await Player.findOne({ where: withTenancyWhere(scope, { id: playerId }) } as any);
+    if (!player) {
+      sendError(res, 'Code806', 404);
+      return;
+    }
+
+    const existingMeta: any = (player as any).metadata || {};
+    const existingAccounts: any[] = Array.isArray(existingMeta.gameAccounts) ? existingMeta.gameAccounts : [];
+    const existing = existingAccounts.find((ga) => String(ga?.gameName || '').trim().toLowerCase() === gameName.toLowerCase());
+    const previousAccountId = typeof existing?.accountId === 'string' ? existing.accountId.trim() : '';
+    const previousAttemptedIds: string[] = Array.isArray(existing?.attemptedIds) ? existing.attemptedIds.map((s: any) => String(s)) : [];
+
+    const game = await Game.findOne({
+      where: withTenancyWhere(scope, { name: gameName, status: 'active', use_api: true }),
+      include: [{ model: Product, attributes: ['providerCode'], required: false }],
+    } as any);
+    if (!game) {
+      sendError(res, 'Code807', 400);
+      return;
+    }
+
+    const vendor = await VendorFactory.getServiceByProviderCode((game as any).Product.providerCode, (game as any).id);
+    if (!vendor) {
+      sendError(res, 'Code808', 400);
+      return;
+    }
+
+    let disabledOk: boolean | null = null;
+    if (previousAccountId) {
+      try {
+        const r = await vendor.setPlayerStatus(previousAccountId, 'Suspend');
+        disabledOk = Boolean(r?.success);
+      } catch {
+        disabledOk = false;
+      }
+    }
+
+    const baseAccountId = String((player as any).player_game_id || '').trim();
+    const attemptedIds: string[] = [];
+    const candidates = new Set<string>();
+    for (const id of previousAttemptedIds) candidates.add(String(id || '').trim());
+    if (previousAccountId) candidates.add(previousAccountId);
+
+    let finalAccountId = baseAccountId;
+    let result: any = null;
+    let created = false;
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const candidate =
+        attempt === 0 ? finalAccountId : (() => {
+          let next = generateConflictAccountId(baseAccountId);
+          let guard = 0;
+          while (candidates.has(next) && guard < 20) {
+            next = generateConflictAccountId(baseAccountId);
+            guard++;
+          }
+          return next;
+        })();
+      if (candidates.has(candidate)) continue;
+      candidates.add(candidate);
+      attemptedIds.push(candidate);
+      result = await vendor.createPlayer(candidate);
+      if (result?.success && !isVendorConflict(result)) {
+        finalAccountId = candidate;
+        created = true;
+        break;
+      }
+      if (isVendorConflict(result)) continue;
+      break;
+    }
+
+    if (!created) {
+      await logAudit(
+        req.user?.id ?? null,
+        'VENDOR_RECREATE_FAILED',
+        { playerId, gameName, previousAccountId },
+        { disabledOk, attemptedIds, error: result?.error || result?.message, vendorRaw: (result as any)?.raw },
+        getClientIp(req) || null
+      );
+      sendError(res, 'Code809', 400, { detail: result?.error || result?.message || 'PV001', attemptedIds, vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined });
+      return;
+    }
+
+    const providerUsername =
+      (result as any)?.raw?.data?.Data?.Username ||
+      (result as any)?.raw?.data?.Username ||
+      finalAccountId;
+    const FIXED_PASSWORD = 'Abcd12345';
+    const pwdResult = await vendor.setPlayerPassword(providerUsername, FIXED_PASSWORD);
+    const password = pwdResult.success ? FIXED_PASSWORD : undefined;
+
+    const nextAccounts = existingAccounts
+      .filter((ga) => String(ga?.gameName || '').trim().toLowerCase() !== gameName.toLowerCase())
+      .concat({
+        gameName,
+        accountId: providerUsername,
+        password,
+        provisioningStatus: 'CREATED',
+        attemptedIds: (previousAccountId ? [previousAccountId].concat(previousAttemptedIds, attemptedIds) : previousAttemptedIds.concat(attemptedIds)).filter(Boolean),
+      });
+    (player as any).metadata = { ...existingMeta, gameAccounts: nextAccounts };
+    await player.save();
+
+    await logAudit(
+      req.user?.id ?? null,
+      'VENDOR_RECREATE_SUCCESS',
+      { playerId, gameName, previousAccountId, accountId: providerUsername },
+      { disabledOk, passwordSet: pwdResult.success, attemptedIds, vendorRaw: (result as any)?.raw, vendorPasswordRaw: (pwdResult as any)?.raw },
+      getClientIp(req) || null
+    );
+
+    sendSuccess(res, 'Code1', {
+      gameAccount: { gameName, accountId: providerUsername, password, provisioningStatus: 'CREATED', attemptedIds },
+      previousAccountId: previousAccountId || null,
+      disabledOk,
+      passwordSet: pwdResult.success,
+      vendorRaw: includeVendorRaw ? (result as any)?.raw : undefined,
+      vendorPasswordRaw: includeVendorRaw ? (pwdResult as any)?.raw : undefined,
+      message: pwdResult.success ? 'OK' : (pwdResult.error || pwdResult.message || 'Password set failed'),
+    });
+  } catch (error: any) {
+    sendError(res, 'Code810', 500);
+  }
+};
+
 export const syncActiveGameAccounts = async (req: AuthRequest, res: Response) => {
   try {
     const scope = getTenancyScopeOrThrow(req);

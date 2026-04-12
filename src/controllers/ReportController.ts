@@ -409,8 +409,9 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
       const waive = toFiniteNumber((r as any).waive);
       const bankAdjustment = toFiniteNumber((r as any).bankAdjustment);
       const gameAdjustment = toFiniteNumber((r as any).gameAdjustment);
-      const balance = deposit - withdraw;
-      const winPct = deposit ? (balance / deposit) * 100 : 0;
+      const balance = deposit + bonus - withdraw - tips - waive;
+      const netDeposit = deposit - withdraw - bonus + waive;
+      const winPct = deposit ? (netDeposit / deposit) * 100 : 0;
       return {
         subBrandId: Number((r as any).subBrandId || 0),
         subBrandName: (r as any).subBrandName || null,
@@ -424,6 +425,7 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
         bankAdjustment,
         gameAdjustment,
         balance,
+        netDeposit,
         winPct,
         playerQty: Number((r as any).playerQty || 0),
       };

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getPlayers, getPlayerList, getPlayerListContext, searchPlayers, createPlayer, updatePlayer, deletePlayer, getNextPlayerId, getPlayerStatistics, getPlayerReferralStats, retryCreateGameAccount, syncActiveGameAccounts } from '../controllers/PlayerController';
+import { getPlayers, getPlayerList, getPlayerListContext, searchPlayers, createPlayer, updatePlayer, deletePlayer, getNextPlayerId, getPlayerStatistics, getPlayerReferralStats, retryCreateGameAccount, recreateGameAccount, syncActiveGameAccounts } from '../controllers/PlayerController';
 import { authenticateToken } from '../middleware/auth';
 import { requireAnyPermission, requirePermission } from '../middleware/permission';
 
@@ -16,6 +16,7 @@ router.get('/:id/referrals', requirePermission('route:players'), getPlayerReferr
 router.get('/newid', requirePermission('action:player_create'), getNextPlayerId);
 router.post('/', requirePermission('action:player_create'), createPlayer);
 router.post('/:id/game-accounts/retry-create', requirePermission('action:player_edit'), retryCreateGameAccount);
+router.post('/:id/game-accounts/recreate', requirePermission('action:player_edit'), recreateGameAccount);
 router.post('/:id/game-accounts/sync-active', requirePermission('action:player_edit'), syncActiveGameAccounts);
 router.put('/:id', requirePermission('action:player_edit'), updatePlayer);
 router.delete('/:id', requirePermission('action:player_edit'), deletePlayer);
