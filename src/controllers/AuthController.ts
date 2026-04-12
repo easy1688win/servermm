@@ -822,7 +822,7 @@ export const setup2FA = async (req: Request, res: Response): Promise<void> => {
 
 export const verify2FA = async (req: Request, res: Response): Promise<void> => {
     try {
-        const { token, code } = req.body;
+        const { token, code, setupSecret } = req.body;
         const clientIp = getClientIp(req);
 
         if (!token || !code) {
@@ -866,13 +866,16 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
         if (decoded.stage === '2fa_setup') {
              // Verify against cached secret
              const cachedSecret = getCache(`2fa_setup_secret:${user.id}`);
-             if (!cachedSecret) {
+             const secretToUse =
+               (typeof cachedSecret === 'string' && cachedSecret.length > 0 && cachedSecret) ||
+               (typeof setupSecret === 'string' && setupSecret.trim().length > 0 ? setupSecret.trim() : null);
+             if (!secretToUse) {
                  sendError(res, 'Code212', 400);
                  return;
              }
 
              const verified = speakeasy.totp.verify({
-                 secret: cachedSecret as string,
+                 secret: secretToUse as string,
                  encoding: 'base32',
                  token: code
              });
@@ -884,7 +887,7 @@ export const verify2FA = async (req: Request, res: Response): Promise<void> => {
              }
 
              // Save to user
-             user.two_factor_secret = encrypt(cachedSecret as string);
+             user.two_factor_secret = encrypt(secretToUse as string);
              user.two_factor_enabled = true;
              await user.save();
              
