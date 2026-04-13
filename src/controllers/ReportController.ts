@@ -19,6 +19,27 @@ const ensureReportTransactionsSynced = async () => {
   reportTransactionsSynced = true;
 };
 
+const toSqlDateTimeInTz8 = (d: Date) => {
+  const ms = d.getTime() + 8 * 60 * 60 * 1000;
+  const x = new Date(ms);
+  const y = x.getUTCFullYear();
+  const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(x.getUTCDate()).padStart(2, '0');
+  const hh = String(x.getUTCHours()).padStart(2, '0');
+  const mm = String(x.getUTCMinutes()).padStart(2, '0');
+  const ss = String(x.getUTCSeconds()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+};
+
+const parseDateParamSql = (val: string) => {
+  const s = val.trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return toSqlDateTimeInTz8(d);
+};
+
 const parseDateParam = (val: string) => {
   let s = val.trim();
   if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
@@ -126,16 +147,24 @@ export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
     const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
 
     const now = new Date();
-    let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    let endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
+    let startAtSql = `${todayKey} 00:00:00`;
+    let endAtSql = `${todayKey} 23:59:59`;
 
     if (startRaw) {
-      const parsed = parseDateParam(startRaw);
-      if (!Number.isNaN(parsed.getTime())) startDate = parsed;
+      const parsed = parseDateParamSql(startRaw);
+      if (parsed) startAtSql = parsed;
     }
     if (endRaw) {
-      const parsed = parseDateParam(endRaw);
-      if (!Number.isNaN(parsed.getTime())) endDate = parsed;
+      const parsed = parseDateParamSql(endRaw);
+      if (parsed) endAtSql = parsed;
+    }
+
+    const startDate = parseDateParam(startAtSql);
+    const endDate = parseDateParam(endAtSql);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      sendError(res, 'Code314', 400);
+      return;
     }
 
     const cacheKey = [
@@ -188,8 +217,8 @@ export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
       replacements: {
         tenantId: scope.tenant_id,
         subBrandId: scope.sub_brand_id,
-        startAt: startDate,
-        endAt: endDate,
+        startAt: startAtSql,
+        endAt: endAtSql,
       },
       type: QueryTypes.SELECT,
     })) as any[];
@@ -306,15 +335,22 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
     const isSuperAdmin = Boolean(req.user?.is_super_admin);
 
     const now = new Date();
-    let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    let endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
+    let startAtSql = `${todayKey} 00:00:00`;
+    let endAtSql = `${todayKey} 23:59:59`;
     if (startRaw) {
-      const p = parseDateParam(startRaw);
-      if (!Number.isNaN(p.getTime())) startDate = p;
+      const p = parseDateParamSql(startRaw);
+      if (p) startAtSql = p;
     }
     if (endRaw) {
-      const p = parseDateParam(endRaw);
-      if (!Number.isNaN(p.getTime())) endDate = p;
+      const p = parseDateParamSql(endRaw);
+      if (p) endAtSql = p;
+    }
+    const startDate = parseDateParam(startAtSql);
+    const endDate = parseDateParam(endAtSql);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      sendError(res, 'Code314', 400);
+      return;
     }
 
     let effectiveTenantId = scope.tenant_id;
@@ -395,8 +431,8 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
     const rowsRaw = (await sequelize.query(sql, {
       replacements: {
         tenantId: effectiveTenantId,
-        startAt: startDate,
-        endAt: endDate,
+        startAt: startAtSql,
+        endAt: endAtSql,
       },
       type: QueryTypes.SELECT,
     })) as any[];
@@ -510,8 +546,15 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       return;
     }
 
-    const start = parseDateParam(String(startDate));
-    const end = parseDateParam(String(endDate));
+    const startAtSql = parseDateParamSql(String(startDate));
+    const endAtSql = parseDateParamSql(String(endDate));
+    if (!startAtSql || !endAtSql) {
+      sendError(res, 'Code9004', 400);
+      return;
+    }
+
+    const start = parseDateParam(startAtSql);
+    const end = parseDateParam(endAtSql);
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
       sendError(res, 'Code9004', 400);
       return;
@@ -555,8 +598,8 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
     const replacements: any = {
       tenantId: scope.tenant_id,
       subBrandId: scope.sub_brand_id,
-      startAt: start,
-      endAt: end,
+      startAt: startAtSql,
+      endAt: endAtSql,
       limit: pageSizeNum,
       offset,
     };

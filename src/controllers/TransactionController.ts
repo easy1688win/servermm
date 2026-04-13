@@ -296,37 +296,43 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       const startRaw = (req.query.startDate as string | undefined) ?? (req.query.start_date as string | undefined) ?? null;
       const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
 
-      // Helper to parse "yyyy-MM-dd HH:mm:ss" as GMT+8
-      const parseDateParam = (val: string) => {
-        let s = val.trim();
-        // If it looks like "yyyy-MM-dd HH:mm:ss", treat as GMT+8
-        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
-          s = s.replace(' ', 'T') + '+08:00';
-        }
-        return new Date(s);
+      const toSqlDateTimeInTz8 = (d: Date) => {
+        const ms = d.getTime() + 8 * 60 * 60 * 1000;
+        const x = new Date(ms);
+        const y = x.getUTCFullYear();
+        const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(x.getUTCDate()).padStart(2, '0');
+        const hh = String(x.getUTCHours()).padStart(2, '0');
+        const mm = String(x.getUTCMinutes()).padStart(2, '0');
+        const ss = String(x.getUTCSeconds()).padStart(2, '0');
+        return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+      };
+
+      const parseDateParamSql = (val: string) => {
+        const s = val.trim();
+        if (!s) return null;
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s;
+        const d = new Date(s);
+        if (Number.isNaN(d.getTime())) return null;
+        return toSqlDateTimeInTz8(d);
       };
 
       const now = new Date();
-      // Default to today 00:00:00 - 23:59:59 GMT+8 if possible, or just local server time
-      // But better to use what we have or rely on frontend sending defaults
-      let startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-      let endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+      const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
+      let startAtSql = `${todayKey} 00:00:00`;
+      let endAtSql = `${todayKey} 23:59:59`;
 
       if (startRaw) {
-        const parsed = parseDateParam(startRaw);
-        if (!Number.isNaN(parsed.getTime())) {
-          startDate = parsed;
-        }
+        const parsed = parseDateParamSql(startRaw);
+        if (parsed) startAtSql = parsed;
       }
       if (endRaw) {
-        const parsed = parseDateParam(endRaw);
-        if (!Number.isNaN(parsed.getTime())) {
-          endDate = parsed;
-        }
+        const parsed = parseDateParamSql(endRaw);
+        if (parsed) endAtSql = parsed;
       }
 
       const txWhere: any = {
-        created_at: { [Op.between]: [startDate, endDate] },
+        created_at: { [Op.between]: [startAtSql, endAtSql] },
         type: { [Op.in]: ['DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BURN'] },
       };
 
@@ -337,8 +343,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         'kiosk_context_v1',
         tenancy.tenant_id,
         tenancy.sub_brand_id,
-        startDate.toISOString(),
-        endDate.toISOString(),
+        startAtSql,
+        endAtSql,
         canViewUsers ? 'u1' : 'u0',
         canViewProfit ? 'p1' : 'p0',
         req.user?.id ?? 0,
@@ -393,7 +399,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         isSummaryReport
           ? Promise.resolve([] as any[])
           : GameAdjustment.findAll({
-              where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startDate, endDate] } } as any),
+              where: withTenancyWhere(tenancy, { createdAt: { [Op.between]: [startAtSql, endAtSql] } } as any),
               order: [['createdAt', 'DESC']],
             } as any),
       ]);
@@ -623,14 +629,25 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
       const startRaw = req.query.startDate as string | undefined;
       const endRaw = req.query.endDate as string | undefined;
       
-      // Helper to parse "yyyy-MM-dd HH:mm:ss" as GMT+8
-      const parseDateParam = (val: string) => {
-        let s = val.trim();
-        // If it looks like "yyyy-MM-dd HH:mm:ss", treat as GMT+8
-        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
-          s = s.replace(' ', 'T') + '+08:00';
-        }
-        return new Date(s);
+      const toSqlDateTimeInTz8 = (d: Date) => {
+        const ms = d.getTime() + 8 * 60 * 60 * 1000;
+        const x = new Date(ms);
+        const y = x.getUTCFullYear();
+        const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(x.getUTCDate()).padStart(2, '0');
+        const hh = String(x.getUTCHours()).padStart(2, '0');
+        const mm = String(x.getUTCMinutes()).padStart(2, '0');
+        const ss = String(x.getUTCSeconds()).padStart(2, '0');
+        return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+      };
+
+      const parseDateParamSql = (val: string) => {
+        const s = val.trim();
+        if (!s) return null;
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s;
+        const d = new Date(s);
+        if (Number.isNaN(d.getTime())) return null;
+        return toSqlDateTimeInTz8(d);
       };
 
       const qRaw = (req.query.q as string | undefined)?.trim() || '';
@@ -641,16 +658,16 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
         const range: any = {};
         let hasRange = false;
         if (startRaw) {
-          const d = parseDateParam(startRaw);
-          if (!Number.isNaN(d.getTime())) {
-            range[Op.gte] = d;
+          const s = parseDateParamSql(startRaw);
+          if (s) {
+            range[Op.gte] = s;
             hasRange = true;
           }
         }
         if (endRaw) {
-          const d = parseDateParam(endRaw);
-          if (!Number.isNaN(d.getTime())) {
-            range[Op.lte] = d;
+          const s = parseDateParamSql(endRaw);
+          if (s) {
+            range[Op.lte] = s;
             hasRange = true;
           }
         }
@@ -671,9 +688,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           } else {
             // no explicit date -> default to TODAY for other search types
             const now = new Date();
-            const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-            const endToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-            where.created_at = { [Op.gte]: startToday, [Op.lte]: endToday };
+            const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
+            where.created_at = { [Op.gte]: `${todayKey} 00:00:00`, [Op.lte]: `${todayKey} 23:59:59` };
           }
         } else if (hasRange) {
           // Date provided: use given range
@@ -684,9 +700,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           // - If no filters and no text search, also default to TODAY
           if (hasInlineFilters || !hasTextSearch) {
             const now = new Date();
-            const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-            const endToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-            where.created_at = { [Op.gte]: startToday, [Op.lte]: endToday };
+            const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
+            where.created_at = { [Op.gte]: `${todayKey} 00:00:00`, [Op.lte]: `${todayKey} 23:59:59` };
           }
         }
       }
