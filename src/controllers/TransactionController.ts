@@ -1611,6 +1611,13 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     const bonusForType = isDeposit ? bonusAmount : 0;
     const walveForType = isWithdrawal || isWalve ? walveAmount : 0;
     const tipsForType = isWithdrawal ? tipsAmount : 0;
+    const bankIdProvided = bank_account_id != null && String(bank_account_id).trim().length > 0;
+    const isBonusOnlyDeposit = isDeposit && amountForType <= 0 && bonusForType > 0 && !bankIdProvided;
+
+    if (isDeposit && amountForType <= 0 && bonusForType <= 0) {
+      sendError(res, 'Code309', 400, { detail: 'Deposit amount or bonus is required' });
+      return;
+    }
 
     const amounts = getTransactionAmounts({
       type,
@@ -1633,14 +1640,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     let gameUseApi = false;
     try {
       const bankAccount =
-        type === 'WALVE'
+        type === 'WALVE' || isBonusOnlyDeposit
           ? null
           : await BankAccount.findOne({
               where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
               transaction: tReserve,
               lock: tReserve.LOCK.UPDATE,
             } as any);
-      if (type !== 'WALVE' && !bankAccount) {
+      if (type !== 'WALVE' && !isBonusOnlyDeposit && !bankAccount) {
         await tReserve.rollback();
         sendError(res, 'Code306', 400, { detail: 'Bank account not found' });
         return;
@@ -1679,7 +1686,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       pendingTransaction = await Transaction.create(
         withTenancyCreate(tenancy, {
           player_id,
-          bank_account_id: type === 'WALVE' ? null : bank_account_id,
+          bank_account_id: type === 'WALVE' || isBonusOnlyDeposit ? null : bank_account_id,
           game_id: effectiveGameId,
           game_account_id,
           operator_id,
@@ -1826,14 +1833,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
 
     const tFinal = await sequelize.transaction();
     try {
-      const bankAccount = type === 'WALVE'
+      const bankAccount = type === 'WALVE' || isBonusOnlyDeposit
         ? null
         : await BankAccount.findOne({
             where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
             transaction: tFinal,
             lock: tFinal.LOCK.UPDATE,
           } as any);
-      if (type !== 'WALVE' && !bankAccount) {
+      if (type !== 'WALVE' && !isBonusOnlyDeposit && !bankAccount) {
         throw new Error('Bank account not found');
       }
 
