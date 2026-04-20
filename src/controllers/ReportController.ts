@@ -186,9 +186,9 @@ export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
     const sql = `
       SELECT
         DATE(t.created_at) AS dayKey,
-        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN 1 ELSE 0 END) AS depositQty,
+        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' AND t.amount > 0 THEN 1 ELSE 0 END) AS depositQty,
         SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN t.amount ELSE 0 END) AS deposit,
-        SUM(CASE WHEN t.type = 'DEPOSIT' AND t.status = 'COMPLETED' THEN t.bonus ELSE 0 END) AS bonus,
+        SUM(CASE WHEN t.status = 'COMPLETED' AND t.type IN ('DEPOSIT', 'BONUS') THEN t.bonus ELSE 0 END) AS bonus,
         SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN 1 ELSE 0 END) AS withdrawQty,
         SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN t.amount ELSE 0 END) AS withdraw,
         SUM(CASE WHEN t.type = 'WITHDRAWAL' AND t.status = 'COMPLETED' THEN t.tips ELSE 0 END) AS tips,
@@ -208,7 +208,7 @@ export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
       WHERE t.tenant_id = :tenantId
         AND t.sub_brand_id = :subBrandId
         AND t.created_at BETWEEN :startAt AND :endAt
-        AND t.type IN ('DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BURN')
+        AND t.type IN ('DEPOSIT', 'BONUS', 'WITHDRAWAL', 'WALVE', 'BURN')
       GROUP BY dayKey
       ORDER BY dayKey ASC
     `;
@@ -250,7 +250,8 @@ export const getSummaryReportData = async (req: AuthRequest, res: Response) => {
       const waive = toFiniteNumber(base.waive ?? 0);
       const playerQty = Number(base.playerQty ?? 0) || 0;
 
-      const balance = deposit - withdraw;
+      // Keep Summary balance consistent with SubBrand report balance logic.
+      const balance = deposit + bonus - withdraw - tips - waive;
       const bonusPct = deposit ? (bonus / deposit) * 100 : 0;
       const winPct = deposit ? (balance / deposit) * 100 : 0;
 
@@ -377,9 +378,9 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
       SELECT
         sb.id AS subBrandId,
         sb.name AS subBrandName,
-        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN 1 ELSE 0 END) AS depositQty,
+        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' AND t.amount > 0 THEN 1 ELSE 0 END) AS depositQty,
         SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN t.amount ELSE 0 END) AS deposit,
-        SUM(CASE WHEN t.type='DEPOSIT' AND t.status='COMPLETED' THEN t.bonus ELSE 0 END) AS bonus,
+        SUM(CASE WHEN t.status='COMPLETED' AND t.type IN ('DEPOSIT','BONUS') THEN t.bonus ELSE 0 END) AS bonus,
         SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN 1 ELSE 0 END) AS withdrawQty,
         SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN t.amount ELSE 0 END) AS withdraw,
         SUM(CASE WHEN t.type='WITHDRAWAL' AND t.status='COMPLETED' THEN t.tips ELSE 0 END) AS tips,
@@ -398,7 +399,7 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
         ON t.sub_brand_id = sb.id
         AND t.tenant_id = :tenantId
         AND t.created_at BETWEEN :startAt AND :endAt
-        AND t.type IN ('DEPOSIT','WITHDRAWAL','WALVE','BURN')
+        AND t.type IN ('DEPOSIT','BONUS','WITHDRAWAL','WALVE','BURN')
       LEFT JOIN (
         SELECT
           sub_brand_id AS subBrandId,
@@ -591,7 +592,7 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
       't.sub_brand_id = :subBrandId',
       "t.status = 'COMPLETED'",
       't.player_id IS NOT NULL',
-      "t.type IN ('DEPOSIT','WITHDRAWAL')",
+      "t.type IN ('DEPOSIT','BONUS','WITHDRAWAL')",
       't.created_at BETWEEN :startAt AND :endAt',
     ];
 
@@ -630,9 +631,9 @@ export const getPlayerWinLossReport = async (req: AuthRequest, res: Response): P
     const sqlWhere = `WHERE ${sqlWhereParts.join(' AND ')}`;
 
     const depositTotalExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN amount ELSE 0 END)`;
-    const bonusClaimedExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN bonus ELSE 0 END)`;
+    const bonusClaimedExpr = `SUM(CASE WHEN type IN ('DEPOSIT','BONUS') THEN bonus ELSE 0 END)`;
     const withdrawalTotalExpr = `SUM(CASE WHEN type = 'WITHDRAWAL' THEN amount ELSE 0 END)`;
-    const depCountExpr = `SUM(CASE WHEN type = 'DEPOSIT' THEN 1 ELSE 0 END)`;
+    const depCountExpr = `SUM(CASE WHEN type = 'DEPOSIT' AND amount > 0 THEN 1 ELSE 0 END)`;
     const wdCountExpr = `SUM(CASE WHEN type = 'WITHDRAWAL' THEN 1 ELSE 0 END)`;
 
     const totalsSql = `

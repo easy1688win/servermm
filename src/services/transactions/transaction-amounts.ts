@@ -1,4 +1,4 @@
-export type TransactionAmountType = 'DEPOSIT' | 'WITHDRAWAL' | 'WALVE';
+export type TransactionAmountType = 'DEPOSIT' | 'WITHDRAWAL' | 'WALVE' | 'BONUS';
 
 export type TransactionAmountsInput = {
   type: TransactionAmountType;
@@ -26,6 +26,11 @@ export const getTransactionAmounts = (input: TransactionAmountsInput): Transacti
     return { vendorTransfer: total, bankDelta: amount, gameDelta: -total, displayTotal: total };
   }
 
+  if (input.type === 'BONUS') {
+    const total = bonus;
+    return { vendorTransfer: total, bankDelta: 0, gameDelta: -total, displayTotal: total };
+  }
+
   if (input.type === 'WITHDRAWAL') {
     const total = amount + walve + tips;
     return { vendorTransfer: total, bankDelta: -amount, gameDelta: total, displayTotal: total };
@@ -34,4 +39,3 @@ export const getTransactionAmounts = (input: TransactionAmountsInput): Transacti
   const total = walve;
   return { vendorTransfer: total, bankDelta: 0, gameDelta: total, displayTotal: total };
 };
-

@@ -74,6 +74,9 @@ const resolveOperatorName = (op: any): string | null => {
   return rawUsername;
 };
 
+const isBanklessTransactionType = (type: any): boolean =>
+  type === 'WALVE' || type === 'BONUS';
+
 const getPendingReservedWithdrawalByBank = async (tenancy: { tenant_id: number; sub_brand_id: number }, tx?: any) => {
   const rows = (await Transaction.findAll({
     attributes: [
@@ -108,7 +111,7 @@ const getPendingReservedDepositByGame = async (tenancy: { tenant_id: number; sub
     ],
     where: withTenancyWhere(tenancy, {
       status: 'PENDING',
-      type: 'DEPOSIT',
+      type: { [Op.in]: ['DEPOSIT', 'BONUS'] },
       game_id: { [Op.ne]: null },
     }),
     group: ['game_id'],
@@ -220,6 +223,7 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
     await ensureTransactionsSynced();
     const tenancy = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
+    const canViewProfit = userPermissions.includes('view:player_profit');
 
     const playerIdRaw = (req.query.player_id as string | undefined) ?? (req.query.playerId as string | undefined);
     if (!playerIdRaw) {
@@ -260,8 +264,10 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
       const json = tx.toJSON();
       const createdAt = json.createdAt ?? json.created_at ?? null;
 
-      const amount: number | null =
-        json.amount != null ? Number(json.amount) : null;
+      const amount: number | null = !canViewProfit ? null : json.amount != null ? Number(json.amount) : 0;
+      const bonus: number | null = !canViewProfit ? null : json.bonus != null ? Number(json.bonus) : 0;
+      const walve: number | null = !canViewProfit ? null : json.walve != null ? Number(json.walve) : 0;
+      const tips: number | null = !canViewProfit ? null : json.tips != null ? Number(json.tips) : 0;
 
       const op = json.operator || json.Operator || null;
       const opFullName = resolveOperatorName(op);
@@ -270,6 +276,9 @@ export const getPlayerTransactionHistory = async (req: AuthRequest, res: Respons
         id: json.id,
         type: json.type,
         amount,
+        bonus,
+        walve,
+        tips,
         status: json.status ?? null,
         createdAt,
         operator: opFullName ? { full_name: opFullName } : null,
@@ -333,7 +342,7 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
       const txWhere: any = {
         created_at: { [Op.between]: [startAtSql, endAtSql] },
-        type: { [Op.in]: ['DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BURN'] },
+        type: { [Op.in]: ['DEPOSIT', 'BONUS', 'WITHDRAWAL', 'WALVE', 'BURN'] },
       };
 
       const txPermissions = Array.from(new Set([...userPermissions, 'view:player_profit']));
@@ -420,6 +429,10 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
 
         if (type === 'DEPOSIT') {
           const r = getTransactionAmounts({ type: 'DEPOSIT', amount: baseAmount, bonus: bonusNum, walve: 0, tips: 0 });
+          signedForGame = r.gameDelta;
+          kioskTotal = r.displayTotal;
+        } else if (type === 'BONUS') {
+          const r = getTransactionAmounts({ type: 'BONUS', amount: 0, bonus: bonusNum, walve: 0, tips: 0 });
           signedForGame = r.gameDelta;
           kioskTotal = r.displayTotal;
         } else if (type === 'WITHDRAWAL') {
@@ -1090,6 +1103,10 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           signedForBank = amountNum;
           const walveDep = Number((t as any).bonus ?? 0);
           signedForGame = -(amountNum + walveDep);
+        } else if (type === 'BONUS') {
+          signedForBank = 0;
+          const bonusOnly = Number((t as any).bonus ?? 0);
+          signedForGame = -bonusOnly;
         } else if (type === 'WITHDRAWAL') {
           signedForBank = -amountNum;
           const walveWd = Number((t as any).walve ?? 0);
@@ -1375,6 +1392,10 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
           signedForBank = amountNum;
           const walveDep = Number((t as any).bonus ?? 0);
           signedForGame = -(amountNum + walveDep);
+        } else if (type === 'BONUS') {
+          signedForBank = 0;
+          const bonusOnly = Number((t as any).bonus ?? 0);
+          signedForGame = -bonusOnly;
         } else if (type === 'WITHDRAWAL') {
           signedForBank = -amountNum;
           const walveWd = Number((t as any).walve ?? 0);
@@ -1472,6 +1493,8 @@ export const getTransactionsContext = async (req: AuthRequest, res: Response) =>
             let calculatedAmount = 0;
             if (t.type === 'DEPOSIT') {
                 calculatedAmount = baseAmount + bonus;
+            } else if (t.type === 'BONUS') {
+                calculatedAmount = bonus;
             } else if (t.type === 'WITHDRAWAL') {
                 calculatedAmount = baseAmount + walve + tips;
             } else if (t.type === 'WALVE') {
@@ -1580,11 +1603,15 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     ctxGameAccountId = typeof game_account_id === 'string' ? game_account_id : null;
     const bonusRaw = (req.body.bonus ?? 0) as number | string;
     const tipsRaw = (req.body.tips ?? 0) as number | string;
-    const remark: string | null = (req.body.remark ?? req.body.staff_note ?? null) as string | null;
+    let remark: string | null = (req.body.remark ?? req.body.staff_note ?? null) as string | null;
     const operator_id = req.user.id;
     const userPermissions = req.user.permissions || [];
 
     if (type === 'DEPOSIT' && !userPermissions.includes('action:deposit_create')) {
+      sendError(res, 'Code301', 403);
+      return;
+    }
+    if (type === 'BONUS' && !userPermissions.includes('action:bonus_create')) {
       sendError(res, 'Code301', 403);
       return;
     }
@@ -1598,6 +1625,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     }
 
     const isDeposit = type === 'DEPOSIT';
+    const isBonus = type === 'BONUS';
     const isWithdrawal = type === 'WITHDRAWAL';
     const isWalve = type === 'WALVE';
 
@@ -1607,15 +1635,23 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     const tipsAmount = parseFloat((tipsRaw as any) || 0);
     const effectiveGameId = game_id || null;
 
-    const amountForType = isWalve ? 0 : amountRaw;
-    const bonusForType = isDeposit ? bonusAmount : 0;
+    const amountForType = isWalve || isBonus ? 0 : amountRaw;
+    const bonusForType = isDeposit || isBonus ? bonusAmount : 0;
     const walveForType = isWithdrawal || isWalve ? walveAmount : 0;
     const tipsForType = isWithdrawal ? tipsAmount : 0;
     const bankIdProvided = bank_account_id != null && String(bank_account_id).trim().length > 0;
-    const isBonusOnlyDeposit = isDeposit && amountForType <= 0 && bonusForType > 0 && !bankIdProvided;
 
-    if (isDeposit && amountForType <= 0 && bonusForType <= 0) {
-      sendError(res, 'Code309', 400, { detail: 'Deposit amount or bonus is required' });
+    if (isBonus && bonusForType <= 0) {
+      sendError(res, 'Code309', 400, { detail: 'Bonus amount is required' });
+      return;
+    }
+
+    if (isDeposit && !bankIdProvided) {
+      sendError(res, 'Code306', 400, { detail: 'Bank account is required' });
+      return;
+    }
+    if (isDeposit && amountForType <= 0) {
+      sendError(res, 'Code309', 400, { detail: 'Deposit amount is required' });
       return;
     }
 
@@ -1640,14 +1676,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     let gameUseApi = false;
     try {
       const bankAccount =
-        type === 'WALVE' || isBonusOnlyDeposit
+        isBanklessTransactionType(type)
           ? null
           : await BankAccount.findOne({
               where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
               transaction: tReserve,
               lock: tReserve.LOCK.UPDATE,
             } as any);
-      if (type !== 'WALVE' && !isBonusOnlyDeposit && !bankAccount) {
+      if (!isBanklessTransactionType(type) && !bankAccount) {
         await tReserve.rollback();
         sendError(res, 'Code306', 400, { detail: 'Bank account not found' });
         return;
@@ -1686,7 +1722,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       pendingTransaction = await Transaction.create(
         withTenancyCreate(tenancy, {
           player_id,
-          bank_account_id: type === 'WALVE' || isBonusOnlyDeposit ? null : bank_account_id,
+          bank_account_id: isBanklessTransactionType(type) ? null : bank_account_id,
           game_id: effectiveGameId,
           game_account_id,
           operator_id,
@@ -1755,7 +1791,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         };
 
         let vendorMessageToPersist: string | null = null;
-        if (type === 'DEPOSIT') {
+        if (type === 'DEPOSIT' || type === 'BONUS') {
           let vendorMessage: string | undefined;
           let needVerify = false;
           try {
@@ -1833,14 +1869,14 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
 
     const tFinal = await sequelize.transaction();
     try {
-      const bankAccount = type === 'WALVE' || isBonusOnlyDeposit
+      const bankAccount = isBanklessTransactionType(type)
         ? null
         : await BankAccount.findOne({
             where: withTenancyWhere(tenancy, { id: bank_account_id } as any),
             transaction: tFinal,
             lock: tFinal.LOCK.UPDATE,
           } as any);
-      if (type !== 'WALVE' && !isBonusOnlyDeposit && !bankAccount) {
+      if (!isBanklessTransactionType(type) && !bankAccount) {
         throw new Error('Bank account not found');
       }
 
@@ -1947,7 +1983,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       const currentTotalTips = Number((stats as any).total_tips || 0);
       const currentTotalBonus = Number((stats as any).total_bonus || 0);
 
-      if (isDeposit) {
+      if (isDeposit && amountForType > 0) {
         (stats as any).deposit_count = Number((stats as any).deposit_count || 0) + 1;
         (stats as any).total_deposit = currentTotalDeposit + amountForType;
         const last = (stats as any).last_deposit_at
@@ -1956,6 +1992,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         if (!last || now > last) {
           (stats as any).last_deposit_at = now;
         }
+      } else if (isDeposit) {
+        (stats as any).total_deposit = currentTotalDeposit + amountForType;
       }
       if (isWithdrawal) {
         (stats as any).withdraw_count = Number((stats as any).withdraw_count || 0) + 1;
@@ -1968,7 +2006,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         }
       }
 
-      if (isDeposit && bonusForType) {
+      if ((isDeposit || isBonus) && bonusForType) {
         (stats as any).total_bonus = currentTotalBonus + bonusForType;
       }
       if (isWithdrawal && walveForType) {
@@ -1999,6 +2037,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       const actionSuffix =
         type === 'DEPOSIT'
           ? 'DEPOSIT'
+          : type === 'BONUS'
+          ? 'BONUS'
           : type === 'WITHDRAWAL'
           ? 'WITHDRAWAL'
           : type === 'WALVE'
@@ -2141,6 +2181,8 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
     const typeSuffix =
       (original as any)?.type === 'DEPOSIT'
         ? 'DEPOSIT'
+        : (original as any)?.type === 'BONUS'
+        ? 'BONUS'
         : (original as any)?.type === 'WITHDRAWAL'
         ? 'WITHDRAWAL'
         : (original as any)?.type === 'WALVE'
@@ -2184,14 +2226,14 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
              throw new Error('Transaction is already voided or rejected');
         }
         const bankAccountId = transaction.bank_account_id as number | null;
-        const bankAccount = transaction.type === 'WALVE' || bankAccountId == null
+        const bankAccount = isBanklessTransactionType(transaction.type) || bankAccountId == null
           ? null
           : await BankAccount.findOne({
               where: withTenancyWhere(tenancy, { id: bankAccountId } as any),
               transaction: t,
               lock: t.LOCK.UPDATE,
             } as any);
-        if (transaction.type !== 'WALVE' && !bankAccount) throw new Error('Bank Account not found');
+        if (!isBanklessTransactionType(transaction.type) && !bankAccount) throw new Error('Bank Account not found');
 
         const player = transaction.player_id
           ? await Player.findOne({ where: withTenancyWhere(tenancy, { id: transaction.player_id } as any), transaction: t } as any)
@@ -2245,6 +2287,12 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
 
             if (player) {
               await player.save({ transaction: t });
+            }
+        } else if (transaction.type === 'BONUS') {
+            if (game) {
+              const beforeGame = Number(game.balance);
+              game.balance = beforeGame + bonus;
+              await game.save({ transaction: t });
             }
         } else if (transaction.type === 'WITHDRAWAL') {
              // 当前规则：
@@ -2304,6 +2352,7 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
           const statsDateOnly = statsDate.toISOString().slice(0, 10);
 
           const isDeposit = transaction.type === 'DEPOSIT';
+          const isBonus = transaction.type === 'BONUS';
           const isWithdrawal = transaction.type === 'WITHDRAWAL';
           const isWalve = transaction.type === 'WALVE';
 
@@ -2326,9 +2375,11 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
           const currentTotalTips = Number((stats as any).total_tips || 0);
           const currentTotalBonus = Number((stats as any).total_bonus || 0);
 
-          if (isDeposit) {
+          if (isDeposit && amount > 0) {
             const count = Number((stats as any).deposit_count || 0) - 1;
             (stats as any).deposit_count = count < 0 ? 0 : count;
+          }
+          if (isDeposit) {
             (stats as any).total_deposit = currentTotalDeposit - amount;
           }
 
@@ -2340,7 +2391,7 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
 
           const walvePart = isWithdrawal || isWalve ? walve : 0;
           const tipsPart = isWithdrawal ? tips : 0;
-          const bonusPart = isDeposit ? bonus : 0;
+          const bonusPart = isDeposit || isBonus ? bonus : 0;
 
           if (walvePart) {
             (stats as any).total_walve = currentTotalWalve - walvePart;
@@ -2367,6 +2418,8 @@ export const voidTransaction = async (req: AuthRequest, res: Response) => {
         const typeSuffix =
           (transaction as any)?.type === 'DEPOSIT'
             ? 'DEPOSIT'
+            : (transaction as any)?.type === 'BONUS'
+            ? 'BONUS'
             : (transaction as any)?.type === 'WITHDRAWAL'
             ? 'WITHDRAWAL'
             : (transaction as any)?.type === 'WALVE'
@@ -2444,14 +2497,14 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
 
     const bankAccountId = transaction.bank_account_id as number | null;
     const bankAccount =
-      transaction.type === 'WALVE' || bankAccountId == null
+      isBanklessTransactionType(transaction.type) || bankAccountId == null
         ? null
         : await BankAccount.findOne({
             where: withTenancyWhere(tenancy, { id: bankAccountId } as any),
             transaction: t,
             lock: t.LOCK.UPDATE,
           } as any);
-    if (transaction.type !== 'WALVE' && !bankAccount) throw new Error('Bank Account not found');
+    if (!isBanklessTransactionType(transaction.type) && !bankAccount) throw new Error('Bank Account not found');
 
     const player = transaction.player_id
       ? await Player.findOne({ where: withTenancyWhere(tenancy, { id: transaction.player_id } as any), transaction: t } as any)
@@ -2502,6 +2555,12 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
         game.balance = beforeGame + (amount + bonus);
         await game.save({ transaction: t });
       }
+    } else if (transaction.type === 'BONUS') {
+      if (game) {
+        const beforeGame = Number(game.balance);
+        game.balance = beforeGame + bonus;
+        await game.save({ transaction: t });
+      }
     } else if (transaction.type === 'WITHDRAWAL') {
       if (bankAccount) {
         (bankAccount as any).total_balance = Number((bankAccount as any).total_balance) + amount;
@@ -2550,8 +2609,8 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
 
       const amounts = getTransactionAmounts({
         type: transaction.type as any,
-        amount: transaction.type === 'WALVE' ? 0 : amount,
-        bonus: transaction.type === 'DEPOSIT' ? bonus : 0,
+        amount: isBanklessTransactionType(transaction.type) ? 0 : amount,
+        bonus: transaction.type === 'DEPOSIT' || transaction.type === 'BONUS' ? bonus : 0,
         walve: transaction.type === 'WITHDRAWAL' || transaction.type === 'WALVE' ? walve : 0,
         tips: transaction.type === 'WITHDRAWAL' ? tips : 0,
       });
@@ -2588,7 +2647,7 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
       let needVerify = false;
 
       try {
-        if (transaction.type === 'DEPOSIT') {
+        if (transaction.type === 'DEPOSIT' || transaction.type === 'BONUS') {
           const v = await vendor.withdraw(vendorUsername, vendorTransfer, rollbackRequestId);
           vendorOk = !!v.success;
           vendorMessage = v.success ? (v.message || v.error || 'OK') : (v.error || v.message);
@@ -2717,6 +2776,7 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
       const statsDateOnly = statsDate.toISOString().slice(0, 10);
 
       const isDeposit = transaction.type === 'DEPOSIT';
+      const isBonus = transaction.type === 'BONUS';
       const isWithdrawal = transaction.type === 'WITHDRAWAL';
       const isWalve = transaction.type === 'WALVE';
 
@@ -2736,9 +2796,11 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
       const currentTotalTips = Number((stats as any).total_tips || 0);
       const currentTotalBonus = Number((stats as any).total_bonus || 0);
 
-      if (isDeposit) {
+      if (isDeposit && amount > 0) {
         const count = Number((stats as any).deposit_count || 0) - 1;
         (stats as any).deposit_count = count < 0 ? 0 : count;
+      }
+      if (isDeposit) {
         (stats as any).total_deposit = currentTotalDeposit - amount;
       }
 
@@ -2750,7 +2812,7 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
 
       const walvePart = isWithdrawal || isWalve ? walve : 0;
       const tipsPart = isWithdrawal ? tips : 0;
-      const bonusPart = isDeposit ? bonus : 0;
+      const bonusPart = isDeposit || isBonus ? bonus : 0;
 
       if (walvePart) {
         (stats as any).total_walve = currentTotalWalve - walvePart;
@@ -2778,6 +2840,8 @@ export const failTransaction = async (req: AuthRequest, res: Response) => {
     const typeSuffix =
       (transaction as any)?.type === 'DEPOSIT'
         ? 'DEPOSIT'
+        : (transaction as any)?.type === 'BONUS'
+          ? 'BONUS'
         : (transaction as any)?.type === 'WITHDRAWAL'
           ? 'WITHDRAWAL'
           : (transaction as any)?.type === 'WALVE'

@@ -45,6 +45,7 @@ const PERMISSIONS = [
 
   // --- Actions ---
   { slug: 'action:deposit_create', description: 'Create Deposit' },
+  { slug: 'action:bonus_create', description: 'Create Bonus' },
   { slug: 'action:withdrawal_create', description: 'Create Withdrawal' },
   { slug: 'action:burn_create', description: 'Create Walve' },
   { slug: 'action:transaction_edit', description: 'Edit Transaction' },
@@ -69,6 +70,13 @@ const PERMISSIONS = [
   { slug: 'action:marketing_manage', description: 'Manage Marketing Landing Pages' },
 ];
 
+const ROLES: Array<{
+  name: string;
+  description: string;
+  isSystem: boolean;
+  permissions: string[];
+}> = [];
+/*
 const ROLES = [
   {
     name: SYSTEM_ROLE_NAMES.superAdmin,
@@ -82,7 +90,7 @@ const ROLES = [
     isSystem: true,
     permissions: [
       'route:dashboard', 'route:transactions', 'route:transaction_history', 'route:players',
-      'action:deposit_create', 'action:withdrawal_create', 'action:player_create', 'action:player_edit',
+      'action:deposit_create', 'action:bonus_create', 'action:withdrawal_create', 'action:player_create', 'action:player_edit',
       'view:player_banks', 'action:player_banks_edit'
     ]
   },
@@ -96,6 +104,7 @@ const ROLES = [
     ]
   }
 ];
+*/
 
 async function initDb() {
   console.log('========================================');

@@ -10,7 +10,7 @@ class Transaction extends Model {
   public game_id!: number | null;
   public game_account_id!: string | null;
   public operator_id!: number;
-  public type!: 'DEPOSIT' | 'WITHDRAWAL' | 'ADJUSTMENT' | 'WALVE';
+  public type!: 'DEPOSIT' | 'WITHDRAWAL' | 'ADJUSTMENT' | 'WALVE' | 'BONUS';
   public amount!: number;
   public bonus!: number;
   public tips!: number;
@@ -53,7 +53,7 @@ Transaction.init({
     allowNull: false,
   },
   type: {
-    type: DataTypes.ENUM('DEPOSIT', 'WITHDRAWAL', 'ADJUSTMENT', 'WALVE'),
+    type: DataTypes.ENUM('DEPOSIT', 'WITHDRAWAL', 'ADJUSTMENT', 'WALVE', 'BONUS'),
     allowNull: false,
   },
   amount: {
@@ -132,7 +132,7 @@ Transaction.init({
       }
 
       // Enforce validation for game-related transactions
-      if (['DEPOSIT', 'WITHDRAWAL', 'WALVE'].includes(transaction.type)) {
+      if (['DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BONUS'].includes(transaction.type)) {
         if (!transaction.player_id) {
           throw new Error('Player is required for this transaction type');
         }

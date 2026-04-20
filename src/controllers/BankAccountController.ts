@@ -97,6 +97,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
     const endDateRaw = (req.query.endDate as string) || null;
     const bankIdRaw = (req.query.bankId as string) || null;
     const typeRaw = (req.query.type as string) || null;
+    const statusRaw = (req.query.status as string) || null;
     const operatorIdRaw = (req.query.operatorId as string) || null;
     const qRaw = ((req.query.q as string) || '').trim();
     const searchTypeRaw = ((req.query.searchType as string) || '').trim().toLowerCase();
@@ -169,9 +170,16 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
         where.bank_account_id = bankIdNum;
       }
     }
+    if (where.bank_account_id == null) {
+      where.bank_account_id = { [Op.ne]: null };
+    }
 
     if (typeRaw && typeRaw !== 'ALL') {
       where.type = typeRaw;
+    }
+
+    if (statusRaw && statusRaw !== 'ALL') {
+      where.status = statusRaw;
     }
 
     if (operatorIdRaw) {
@@ -203,7 +211,7 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
       required: hasTextSearch && searchTypeRaw === 'player_id',
     } as any;
 
-    const [accountsRaw, txResult, catalog, allOperators] = await Promise.all([
+    const [accountsRaw, txResult, catalog, allOperators, totalsRaw] = await Promise.all([
       BankAccount.findAll({ where: withTenancyWhere(scope) } as any),
       Transaction.findAndCountAll({
         where: withTenancyWhere(scope, where),
@@ -226,7 +234,23 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
             where: { tenant_id: scope.tenant_id, status: 'active' } as any,
             order: [['username', 'ASC']],
           } as any)
-        : []
+        : [],
+      canViewBalance
+        ? (Transaction.findOne({
+            attributes: [
+              [
+                sequelize.fn(
+                  'SUM',
+                  sequelize.literal(`CASE WHEN type = 'WITHDRAWAL' THEN -amount ELSE amount END`),
+                ),
+                'grandTotalSignedAmount',
+              ],
+            ],
+            where: withTenancyWhere(scope, where),
+            include: includePlayer.required ? [{ ...includePlayer, attributes: [] }] : [],
+            raw: true,
+          } as any) as any)
+        : Promise.resolve(null),
     ]);
 
     const accounts = (accountsRaw as any[]).filter((account) => account.status !== 'banned');
@@ -365,12 +389,20 @@ export const getBankContext = async (req: AuthRequest, res: Response) => {
       icon: c.icon || null,
     }));
 
+    const grandTotalSignedAmount =
+      totalsRaw && (totalsRaw as any).grandTotalSignedAmount != null
+        ? Number((totalsRaw as any).grandTotalSignedAmount)
+        : null;
+
     sendSuccess(res, 'Code1', {
       bankAccounts,
       transactions: shapedTransactions,
       bankCatalog,
       operatorOptions,
       subBrandOptions,
+      activityTotals: {
+        grandTotalSignedAmount,
+      },
       pagination: {
         page,
         pageSize,
