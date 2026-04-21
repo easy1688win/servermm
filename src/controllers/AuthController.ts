@@ -1637,6 +1637,7 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
 
     if ((res as any).flushHeaders) {
       (res as any).flushHeaders();
@@ -1646,10 +1647,19 @@ export const sessionEvents = async (req: Request, res: Response): Promise<void> 
 
     addSseClient(userId, res);
 
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(':\n\n');
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 25000);
+
     res.write(`event: connected\n`);
     res.write(`data: ${JSON.stringify({ jti })}\n\n`);
 
     const onClose = () => {
+      clearInterval(heartbeat);
       removeSseClient(userId, res);
       res.end();
     };
