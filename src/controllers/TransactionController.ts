@@ -2106,7 +2106,9 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         } else if (
           msgLower.includes('insufficient') || 
           msgLower.includes('balance not enough') || 
-          msgLower.includes('not enough balance')
+          msgLower.includes('not enough balance') ||
+          msgLower.includes('credit not enough') ||
+          msgLower.includes('not enough credit')
         ) {
           categoryRemark = 'Insufficient Credit';
           errorKey = 'Code1014'; // Map to "资金不足" (Insufficient funds)
@@ -2124,6 +2126,31 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             ? pendingTransaction.remark.trim()
             : null;
         const rejectedRemark = `${existingRemark ? `${existingRemark}\n` : ''}${categoryRemark}`;
+
+        // 记录失败的 Audit Log
+        const actionSuffix =
+          type === 'DEPOSIT'
+            ? 'DEPOSIT'
+            : type === 'BONUS'
+            ? 'BONUS'
+            : type === 'WITHDRAWAL'
+            ? 'WITHDRAWAL'
+            : type === 'WALVE'
+            ? 'WALVE'
+            : 'UNKNOWN';
+
+        await logAudit(
+          operator_id,
+          `TRANSACTION_FAILED_${actionSuffix}`,
+          null,
+          { 
+            transactionId: pendingTransaction.id, 
+            error: categoryRemark, 
+            vendorMessage,
+            detail: responseDetail
+          },
+          clientIp || undefined,
+        );
 
         if (msgLower.includes('suspended')) {
           try {
