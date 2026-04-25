@@ -2125,7 +2125,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         const rawMsg = String(error?.vendorMessage ?? error?.error ?? error?.message ?? error ?? '');
         const vendorMessage = rawMsg.trim().length > 0 ? rawMsg.slice(0, 500) : null;
         const msgLower = rawMsg.toLowerCase();
-        let categoryRemark = 'API ERROR';
+        let categoryRemark = vendorMessage || 'API ERROR';
         
         if (msgLower.includes('suspended')) {
           categoryRemark = 'Player account is suspended';
