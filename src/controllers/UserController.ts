@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { User, Permission, Role, UserRole, UserPermission, Tenant, SubBrand } from '../models';
+import { User, Permission, Role, UserRole, UserPermission, Tenant, SubBrand, UserTenant } from '../models';
 import bcrypt from 'bcryptjs';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
@@ -31,6 +31,36 @@ const maskIpForDisplay = (ip: string | null): string | null => {
   return '***.***.***.***';
 };
 
+const getRoleFlags = (req: AuthRequest, requester: any) => {
+  const roles = Array.isArray(requester?.Roles) ? requester.Roles : [];
+  const isSuperAdmin =
+    Boolean(req.user?.is_super_admin) ||
+    roles.some((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin');
+  const isOperator = roles.some((r: any) => String(r?.name ?? '').toLowerCase() === 'operator');
+  const isAgent = roles.some((r: any) => String(r?.name ?? '').toLowerCase() === 'agent');
+  return { isSuperAdmin, isOperator, isAgent };
+};
+
+const getManagedTenantIdsForAgent = async (userId: number, fallbackTenantId?: unknown): Promise<number[]> => {
+  const rows = await UserTenant.findAll({ where: { userId }, attributes: ['tenantId'] });
+  const ids = rows
+    .map((r: any) => Number(r.tenantId))
+    .filter((x: number) => Number.isFinite(x) && x > 0);
+
+  const fallback = Number(fallbackTenantId ?? null);
+  if (Number.isFinite(fallback) && fallback > 0 && !ids.includes(fallback)) {
+    ids.push(fallback);
+  }
+  return ids;
+};
+
+const parseOptionalId = (raw: any): number | null => {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+};
+
 export const getUsers = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     // Determine requester role membership
@@ -40,10 +70,7 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
     });
     
     // Check if requester is Super Admin
-    const isSuperAdmin =
-      Boolean(req.user?.is_super_admin) ||
-      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
-    const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
+    const { isSuperAdmin, isOperator, isAgent } = getRoleFlags(req, requester);
     
     // Check specific permissions
     const permissions = (req.user?.permissions || []) as string[];
@@ -56,8 +83,67 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
       whereClause = {};
     } else if (isOperator && requesterTenantId) {
       whereClause = { tenant_id: requesterTenantId };
+    } else if (isAgent && requesterId) {
+      const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+      if (ids.length === 0) {
+        sendSuccess(res, 'Code1', []);
+        return;
+      }
+      whereClause = { tenant_id: ids };
     } else {
       whereClause = { id: requesterId };
+    }
+
+    const requestedTenantId = parseOptionalId((req.query as any)?.tenantId ?? (req.query as any)?.tenant_id);
+    const requestedSubBrandId = parseOptionalId((req.query as any)?.subBrandId ?? (req.query as any)?.sub_brand_id);
+
+    if (requestedTenantId) {
+      if (isSuperAdmin) {
+        whereClause.tenant_id = requestedTenantId;
+      } else if (isOperator) {
+        const tid = Number(requesterTenantId ?? null);
+        if (!Number.isFinite(tid) || tid <= 0 || tid !== requestedTenantId) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        whereClause.tenant_id = requestedTenantId;
+      } else if (isAgent && requesterId) {
+        const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+        if (!ids.includes(requestedTenantId)) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        whereClause.tenant_id = requestedTenantId;
+      }
+    }
+
+    if (requestedSubBrandId) {
+      const sb: any = await SubBrand.findByPk(requestedSubBrandId);
+      if (!sb) {
+        sendError(res, 'Code607', 404);
+        return;
+      }
+      const sbTenantId = Number(sb.tenant_id ?? null);
+      if (requestedTenantId && sbTenantId !== requestedTenantId) {
+        sendError(res, 'Code102', 403);
+        return;
+      }
+      if (!isSuperAdmin) {
+        if (isOperator) {
+          const tid = Number(requesterTenantId ?? null);
+          if (!Number.isFinite(tid) || tid <= 0 || sbTenantId !== tid) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+        } else if (isAgent && requesterId) {
+          const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+          if (!ids.includes(sbTenantId)) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+        }
+      }
+      whereClause.sub_brand_id = requestedSubBrandId;
     }
 
     const users = await User.findAll({
@@ -87,10 +173,31 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
     
     let visibleUsers = users;
     if (!isSuperAdmin) {
-        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+        visibleUsers = users.filter((u) => {
+          if (u.id === requesterId) return true;
+          return !u.Roles?.some((r: Role) => {
+            const n = String(r.name).toLowerCase();
+            if (n === 'super admin') return true;
+            if (n === 'agent') return !isAgent;
+            return false;
+          });
+        });
     }
 
     const formattedUsers = visibleUsers.map((user) => {
+      const userTenantId = Number((user as any).tenant_id ?? null);
+      const filteredRoles = Array.isArray(user.Roles)
+        ? user.Roles.filter((r: any) => {
+          const roleTenantIdRaw = (r as any)?.tenant_id;
+          const roleTenantId = roleTenantIdRaw == null ? null : Number(roleTenantIdRaw);
+          const roleNameLower = String((r as any)?.name ?? '').toLowerCase();
+          if (Number.isFinite(userTenantId) && userTenantId > 0 && roleTenantId != null && Number.isFinite(roleTenantId) && roleTenantId > 0) {
+            return roleTenantId === userTenantId;
+          }
+          return roleTenantId == null && roleNameLower === 'super admin';
+        })
+        : [];
+      const roleNames = Array.from(new Set(filteredRoles.map((r: any) => r.name)));
       // Basic fields
       const base = {
         id: user.id,
@@ -98,7 +205,7 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
         full_name: user.full_name,
         status: user.status,
         currency: user.currency,
-        roles: user.Roles ? user.Roles.map((r: Role) => r.name) : [],
+        roles: roleNames,
         permissions: user.Permissions ? user.Permissions.map((p: Permission) => p.slug) : [],
         two_factor_enabled: user.two_factor_enabled,
       };
@@ -155,19 +262,35 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
       include: [{ model: Role, through: { attributes: [] } }]
     });
     
-    const isSuperAdmin =
-      Boolean(req.user?.is_super_admin) ||
-      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
-    const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
+    const { isSuperAdmin, isOperator, isAgent } = getRoleFlags(req, requester);
+
+    const requestedTenantId = parseOptionalId((req.query as any)?.tenantId ?? (req.query as any)?.tenant_id);
+    const requestedSubBrandId = parseOptionalId((req.query as any)?.subBrandId ?? (req.query as any)?.sub_brand_id);
+    const requesterTenantId = (requester as any)?.tenant_id ?? req.user?.tenant_id ?? null;
+    const scopeRoleTenantId = requestedTenantId ?? parseOptionalId(requesterTenantId) ?? parseOptionalId(req.user?.tenant_id);
     
     // Get roles with permission filtering
     let roles = await Role.findAll({
+        where: scopeRoleTenantId
+          ? (isSuperAdmin
+            ? ({
+              [Op.or]: [
+                { tenant_id: scopeRoleTenantId },
+                { tenant_id: null, name: 'Super Admin' },
+              ],
+            } as any)
+            : ({ tenant_id: scopeRoleTenantId } as any))
+          : ({ tenant_id: null } as any),
         include: [Permission]
     });
     
     // Filter roles: non-superadmin users cannot see Super Admin role
     if (!isSuperAdmin) {
-        roles = roles.filter(role => role.name !== 'Super Admin');
+        roles = roles.filter((role) => {
+          if (role.name === 'Super Admin') return false;
+          if (role.name === 'Agent') return isAgent;
+          return true;
+        });
     }
     
     const permissions = await Permission.findAll();
@@ -181,14 +304,65 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
     const canViewFullIp = userPermissions.includes('view:full_ip');
     const canViewSensitive = userPermissions.includes('view:sensitive_info');
 
-    const requesterTenantId = (requester as any)?.tenant_id ?? req.user?.tenant_id ?? null;
     let whereClause: any = {};
     if (isSuperAdmin) {
       whereClause = {};
     } else if (isOperator && requesterTenantId) {
       whereClause = { tenant_id: requesterTenantId };
+    } else if (isAgent && requesterId) {
+      const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+      whereClause = ids.length === 0 ? ({ id: requesterId } as any) : ({ tenant_id: ids } as any);
     } else {
       whereClause = { id: requesterId };
+    }
+
+    if (requestedTenantId) {
+      if (isSuperAdmin) {
+        whereClause.tenant_id = requestedTenantId;
+      } else if (isOperator) {
+        const tid = Number(requesterTenantId ?? null);
+        if (!Number.isFinite(tid) || tid <= 0 || tid !== requestedTenantId) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        whereClause.tenant_id = requestedTenantId;
+      } else if (isAgent && requesterId) {
+        const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+        if (!ids.includes(requestedTenantId)) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        whereClause.tenant_id = requestedTenantId;
+      }
+    }
+
+    if (requestedSubBrandId) {
+      const sb: any = await SubBrand.findByPk(requestedSubBrandId);
+      if (!sb) {
+        sendError(res, 'Code607', 404);
+        return;
+      }
+      const sbTenantId = Number(sb.tenant_id ?? null);
+      if (requestedTenantId && sbTenantId !== requestedTenantId) {
+        sendError(res, 'Code102', 403);
+        return;
+      }
+      if (!isSuperAdmin) {
+        if (isOperator) {
+          const tid = Number(requesterTenantId ?? null);
+          if (!Number.isFinite(tid) || tid <= 0 || sbTenantId !== tid) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+        } else if (isAgent && requesterId) {
+          const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+          if (!ids.includes(sbTenantId)) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+        }
+      }
+      whereClause.sub_brand_id = requestedSubBrandId;
     }
 
     const users = await User.findAll({
@@ -218,17 +392,38 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
 
     let visibleUsers = users;
     if (!isSuperAdmin) {
-        visibleUsers = users.filter(u => !u.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+        visibleUsers = users.filter((u) => {
+          if (u.id === requesterId) return true;
+          return !u.Roles?.some((r: Role) => {
+            const n = String(r.name).toLowerCase();
+            if (n === 'super admin') return true;
+            if (n === 'agent') return !isAgent;
+            return false;
+          });
+        });
     }
 
     const formattedUsers = visibleUsers.map((user) => {
+      const userTenantId = Number((user as any).tenant_id ?? null);
+      const filteredRoles = Array.isArray(user.Roles)
+        ? user.Roles.filter((r: any) => {
+          const roleTenantIdRaw = (r as any)?.tenant_id;
+          const roleTenantId = roleTenantIdRaw == null ? null : Number(roleTenantIdRaw);
+          const roleNameLower = String((r as any)?.name ?? '').toLowerCase();
+          if (Number.isFinite(userTenantId) && userTenantId > 0 && roleTenantId != null && Number.isFinite(roleTenantId) && roleTenantId > 0) {
+            return roleTenantId === userTenantId;
+          }
+          return roleTenantId == null && roleNameLower === 'super admin';
+        })
+        : [];
+      const roleNames = Array.from(new Set(filteredRoles.map((r: any) => r.name)));
       const base = {
         id: user.id,
         username: user.username,
         full_name: user.full_name,
         status: user.status,
         currency: user.currency,
-        roles: user.Roles ? user.Roles.map((r: Role) => r.name) : [],
+        roles: roleNames,
         permissions: user.Permissions ? user.Permissions.map((p: Permission) => p.slug) : [],
         two_factor_enabled: user.two_factor_enabled,
       };
@@ -286,6 +481,14 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
           SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] }),
         ]);
       }
+    } else if (isAgent && requesterId) {
+      const ids = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+      if (ids.length > 0) {
+        [tenants, subBrands] = await Promise.all([
+          Tenant.findAll({ where: { id: ids } as any, order: [['id', 'ASC']] }),
+          SubBrand.findAll({ where: { tenant_id: ids } as any, order: [['id', 'ASC']] }),
+        ]);
+      }
     }
 
     sendSuccess(res, 'Code1', { roles, permissions, users: formattedUsers, tenants, subBrands });
@@ -308,11 +511,16 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
       Boolean(req.user?.is_super_admin) ||
       Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
     const isOperator = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'operator'));
+    const isAgent = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'agent'));
     
     // Validate roles: non-superadmin users cannot assign Super Admin role
     if (roles && Array.isArray(roles)) {
         if (!isSuperAdmin && roles.includes('Super Admin')) {
             sendError(res, 'Code604', 403); // Access denied: Cannot assign Super Admin role
+            return;
+        }
+        if (!isSuperAdmin && !isAgent && roles.includes('Agent')) {
+            sendError(res, 'Code604', 403); // Access denied: Cannot assign Agent role
             return;
         }
     }
@@ -355,6 +563,24 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
         }
         const sbTenantId = Number((resolvedSubBrand as any).tenant_id ?? null);
         if (!Number.isFinite(requesterTenantId) || requesterTenantId <= 0 || sbTenantId !== requesterTenantId) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+      } else if (isAgent) {
+        const rawId = requestedSubBrandIdRaw ?? null;
+        const nextId = rawId !== null && rawId !== undefined ? Number(rawId) : null;
+        if (!nextId || !Number.isFinite(nextId) || nextId <= 0) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        resolvedSubBrand = await SubBrand.findByPk(nextId);
+        if (!resolvedSubBrand) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
+        const sbTenantId = Number((resolvedSubBrand as any).tenant_id ?? null);
+        const managed = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+        if (!Number.isFinite(sbTenantId) || !managed.includes(sbTenantId)) {
           sendError(res, 'Code102', 403);
           return;
         }
@@ -409,16 +635,28 @@ export const createUser = async (req: AuthRequest, res: Response): Promise<void>
     });
 
     if (roles && Array.isArray(roles)) {
-        const roleObjects = await Role.findAll({
-             where: {
-                 name: {
-                     [Op.in]: roles
-                 }
-             }
-        });
-        
+        const targetTenantId = Number((resolvedSubBrand as any).tenant_id ?? null);
+        const roleNames = roles.map((r: any) => String(r)).filter((r: string) => r.trim().length > 0);
+        const wantsSuperAdmin = roleNames.some((r: string) => r.toLowerCase() === 'super admin');
+        const tenantRoleNames = roleNames.filter((r: string) => r.toLowerCase() !== 'super admin');
+
+        const roleObjects: any[] = [];
+        if (tenantRoleNames.length > 0) {
+          const tenantRoles = await Role.findAll({
+            where: {
+              tenant_id: targetTenantId,
+              name: { [Op.in]: tenantRoleNames },
+            } as any,
+          });
+          roleObjects.push(...(tenantRoles as any[]));
+        }
+        if (wantsSuperAdmin && isSuperAdmin) {
+          const superAdminRole = await Role.findOne({ where: { tenant_id: null, name: 'Super Admin' } as any });
+          if (superAdminRole) roleObjects.push(superAdminRole as any);
+        }
+
         for (const role of roleObjects) {
-            await UserRole.create({ userId: user.id, roleId: role.id });
+          await UserRole.findOrCreate({ where: { userId: user.id, roleId: role.id } as any });
         }
     }
 
@@ -457,12 +695,20 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
       include: [{ model: Role, through: { attributes: [] } }]
     });
     
-    const isSuperAdmin = Boolean(requester?.Roles?.some((r: Role) => r.name === 'Super Admin'));
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'super admin'));
+    const isAgent = Boolean(requester?.Roles?.some((r: Role) => String(r.name).toLowerCase() === 'agent'));
+    const requesterTenantId = (requester as any)?.tenant_id ?? req.user?.tenant_id ?? null;
     
     // Validate roles: non-superadmin users cannot assign Super Admin role
     if (roles && Array.isArray(roles)) {
         if (!isSuperAdmin && roles.includes('Super Admin')) {
             sendError(res, 'Code604', 403); // Access denied: Cannot assign Super Admin role
+            return;
+        }
+        if (!isSuperAdmin && roles.includes('Agent')) {
+            sendError(res, 'Code604', 403); // Access denied: Cannot assign Agent role
             return;
         }
     }
@@ -479,7 +725,17 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
         return;
     }
 
+    if (!isSuperAdmin && isAgent && requesterId && userId !== requesterId) {
+      const managed = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+      const targetTenantId = Number((user as any).tenant_id ?? null);
+      if (!Number.isFinite(targetTenantId) || !managed.includes(targetTenantId)) {
+        sendError(res, 'Code102', 403);
+        return;
+      }
+    }
+
     const original = user.toJSON();
+    const originalTenantId = Number((original as any)?.tenant_id ?? null);
 
     //禁止修改username - 用户名是核心身份标识
     if (username !== undefined && username !== user.username) {
@@ -505,7 +761,7 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
 
     const targetSubBrandRaw = sub_brand_id ?? subBrandId;
     if (targetSubBrandRaw !== undefined) {
-      if (!isSuperAdmin) {
+      if (!isSuperAdmin && !isAgent) {
         sendError(res, 'Code102', 403);
         return;
       }
@@ -518,6 +774,14 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
       if (!sb) {
         sendError(res, 'Code1216', 404);
         return;
+      }
+      if (!isSuperAdmin && isAgent && requesterId) {
+        const managed = await getManagedTenantIdsForAgent(Number(requesterId), requesterTenantId);
+        const sbTenantId = Number((sb as any).tenant_id ?? null);
+        if (!Number.isFinite(sbTenantId) || !managed.includes(sbTenantId)) {
+          sendError(res, 'Code102', 403);
+          return;
+        }
       }
       (user as any).sub_brand_id = sb.id;
       (user as any).tenant_id = (sb as any).tenant_id;
@@ -532,16 +796,31 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
       if (isSuperAdmin) {
         if (Array.isArray(roles)) {
           // Super Admin 不得将目标用户设置为 Super Admin 以外？这里允许 Super Admin 完整管理
-          const roleObjects = await Role.findAll({
-            where: {
-              name: {
-                [Op.in]: roles
-              }
-            }
-          });
+          const targetTenantId = Number((user as any).tenant_id ?? null);
+          const roleNames = roles.map((r: any) => String(r)).filter((r: string) => r.trim().length > 0);
+          const wantsSuperAdmin = roleNames.some((r: string) => r.toLowerCase() === 'super admin');
+          const tenantRoleNames = roleNames.filter((r: string) => r.toLowerCase() !== 'super admin');
+
+          const roleObjects: any[] = [];
+          if (tenantRoleNames.length > 0) {
+            const tenantRoles = await Role.findAll({
+              where: { tenant_id: targetTenantId, name: { [Op.in]: tenantRoleNames } } as any,
+            });
+            roleObjects.push(...(tenantRoles as any[]));
+          }
+          if (wantsSuperAdmin) {
+            const superAdminRole = await Role.findOne({ where: { tenant_id: null, name: 'Super Admin' } as any });
+            if (superAdminRole) roleObjects.push(superAdminRole as any);
+          }
+
           await UserRole.destroy({ where: { userId: user.id } });
           for (const role of roleObjects) {
-            await UserRole.create({ userId: user.id, roleId: role.id });
+            await UserRole.findOrCreate({ where: { userId: user.id, roleId: role.id } as any });
+          }
+
+          invalidateCache(`user_permissions:${user.id}:${targetTenantId ?? 'null'}`);
+          if (Number.isFinite(originalTenantId) && originalTenantId > 0 && originalTenantId !== targetTenantId) {
+            invalidateCache(`user_permissions:${user.id}:${originalTenantId}`);
           }
         }
       } else {

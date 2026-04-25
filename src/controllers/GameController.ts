@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { Game, GameAdjustment, Product, Role, SubBrand, Transaction, User } from '../models';
+import { Game, GameAdjustment, Product, Role, SubBrand, Transaction, User, UserTenant } from '../models';
 import { logAudit } from '../services/AuditService';
 import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
@@ -295,12 +295,25 @@ export const getGamesContext = async (req: AuthRequest, res: Response): Promise<
             Boolean(req.user?.is_super_admin) ||
             Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'super admin'));
           const isOperator = Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'operator'));
+          const isAgent = Boolean((requester as any)?.Roles?.some((r: Role) => String((r as any)?.name).toLowerCase() === 'agent'));
           if (isSuperAdmin) {
             subBrands = await SubBrand.findAll({ order: [['id', 'ASC']] });
           } else if (isOperator) {
             const tid = Number((requester as any)?.tenant_id ?? null);
             if (Number.isFinite(tid) && tid > 0) {
               subBrands = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] });
+            }
+          } else if (isAgent) {
+            const rows = await UserTenant.findAll({ where: { userId: requesterId }, attributes: ['tenantId'] } as any);
+            const tenantIds = (rows as any[])
+              .map((r: any) => Number((r as any).tenantId))
+              .filter((x: number) => Number.isFinite(x) && x > 0);
+            const fallbackTenantId = Number((requester as any)?.tenant_id ?? null);
+            if (Number.isFinite(fallbackTenantId) && fallbackTenantId > 0 && !tenantIds.includes(fallbackTenantId)) {
+              tenantIds.push(fallbackTenantId);
+            }
+            if (tenantIds.length > 0) {
+              subBrands = await SubBrand.findAll({ where: { tenant_id: tenantIds } as any, order: [['id', 'ASC']] } as any);
             }
           }
         }
@@ -778,9 +791,9 @@ export const adjustBalance = async (req: AuthRequest, res: Response): Promise<vo
   try {
     const scope = getTenancyScopeOrThrow(req);
     const userPermissions = req.user?.permissions || [];
-    const hasGameOperational = (userPermissions as string[]).includes('action:game_operational');
-    
-    if (!hasGameOperational) {
+    const canAdjust = (userPermissions as string[]).includes('action:game_adjust_balance');
+
+    if (!canAdjust) {
       await t.rollback();
       sendError(res, 'Code1012', 403);
       return;

@@ -15,9 +15,9 @@ router.get(
 router.get('/', getAllGames);
 router.get('/adjustments', getGameAdjustments);
 router.get('/:id', requireAnyPermission(['view:games', 'route:settings', 'action:settings_manage']), getGameById);
-router.post('/', requireAnyPermission(['action:game_operational', 'action:settings_manage']), createGame); // Or appropriate permission
-router.put('/:id', requireAnyPermission(['action:game_operational', 'action:settings_manage']), update);
-router.delete('/:id', requireAnyPermission(['action:game_operational', 'action:settings_manage']), deleteGame);
-router.post('/:id/adjust', requireAnyPermission(['action:game_operational', 'action:settings_manage']), adjustBalance); // Maybe specific permission for adjustment
+router.post('/', requirePermission('action:game_operational'), createGame);
+router.put('/:id', requirePermission('action:game_operational'), update);
+router.delete('/:id', requirePermission('action:game_operational'), deleteGame);
+router.post('/:id/adjust', requirePermission('action:game_adjust_balance'), adjustBalance);
 
 export default router;

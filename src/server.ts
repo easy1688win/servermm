@@ -186,7 +186,7 @@ const startServer = async () => {
     // 设置全局错误处理
     setupGlobalErrorHandlers();
     
-    await sequelize.authenticate();    
+    await sequelize.authenticate();
     app.listen(PORT, () => {
       console.log(`🚀 Server running...`);
     });

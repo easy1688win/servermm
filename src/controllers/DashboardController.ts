@@ -360,6 +360,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
 
     // Build sub brand options for FE
     let subBrandOptions: any[] = [];
+    let tenantOptions: any[] = [];
     try {
       const requesterId = req.user?.id;
       const requester: any = requesterId
@@ -374,9 +375,17 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
         Boolean(requester?.is_super_admin) ||
         Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
       const isOperator = Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'operator'));
+      const isAgent = Boolean(userRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'agent'));
 
-      const { SubBrand } = await import('../models');
+      const { SubBrand, Tenant, UserTenant } = await import('../models');
       if (isSuperAdmin) {
+        const tenantRows = await Tenant.findAll({ order: [['id', 'ASC']] } as any);
+        tenantOptions = (tenantRows as any[]).map((t: any) => ({
+          id: t.id,
+          prefix: (t as any).prefix ?? null,
+          name: (t as any).name ?? null,
+          status: (t as any).status ?? null,
+        }));
         const rows = await SubBrand.findAll({ order: [['id', 'ASC']] } as any);
         subBrandOptions = (rows as any[]).map((sb: any) => ({
           id: sb.id,
@@ -388,7 +397,42 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       } else if (isOperator) {
         const tid = Number(req.user?.tenant_id ?? null);
         if (Number.isFinite(tid) && tid > 0) {
+          const tenantRows = await Tenant.findAll({ where: { id: tid } as any, order: [['id', 'ASC']] } as any);
+          tenantOptions = (tenantRows as any[]).map((t: any) => ({
+            id: t.id,
+            prefix: (t as any).prefix ?? null,
+            name: (t as any).name ?? null,
+            status: (t as any).status ?? null,
+          }));
           const rows = await SubBrand.findAll({ where: { tenant_id: tid } as any, order: [['id', 'ASC']] } as any);
+          subBrandOptions = (rows as any[]).map((sb: any) => ({
+            id: sb.id,
+            tenant_id: (sb as any).tenant_id ?? null,
+            code: (sb as any).code ?? null,
+            name: (sb as any).name ?? null,
+            status: (sb as any).status ?? null,
+          }));
+        }
+      } else if (isAgent && requesterId) {
+        const rows = await UserTenant.findAll({ where: { userId: requesterId }, attributes: ['tenantId'] });
+        const tenantIds = rows
+          .map((r: any) => Number(r.tenantId))
+          .filter((x: number) => Number.isFinite(x) && x > 0);
+
+        const fallbackTenantId = Number(requester?.tenant_id ?? req.user?.tenant_id ?? null);
+        if (Number.isFinite(fallbackTenantId) && fallbackTenantId > 0 && !tenantIds.includes(fallbackTenantId)) {
+          tenantIds.push(fallbackTenantId);
+        }
+
+        if (tenantIds.length > 0) {
+          const tenantRows = await Tenant.findAll({ where: { id: tenantIds } as any, order: [['id', 'ASC']] } as any);
+          tenantOptions = (tenantRows as any[]).map((t: any) => ({
+            id: t.id,
+            prefix: (t as any).prefix ?? null,
+            name: (t as any).name ?? null,
+            status: (t as any).status ?? null,
+          }));
+          const rows = await SubBrand.findAll({ where: { tenant_id: tenantIds } as any, order: [['id', 'ASC']] } as any);
           subBrandOptions = (rows as any[]).map((sb: any) => ({
             id: sb.id,
             tenant_id: (sb as any).tenant_id ?? null,
@@ -417,6 +461,7 @@ export const getDashboardSummary = async (req: AuthRequest, res: Response) => {
       kioskReports,
       staffPerformance,
       subBrandOptions,
+      tenantOptions,
       partialErrors: {
         banks: false,
         players: false,

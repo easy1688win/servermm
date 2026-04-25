@@ -7,6 +7,8 @@ class SubBrand extends Model {
   public code!: string;
   public name!: string;
   public status!: 'active' | 'inactive';
+  public created_by!: number | null;
+  public updated_by!: number | null;
 }
 
 SubBrand.init(
@@ -33,6 +35,14 @@ SubBrand.init(
       type: DataTypes.ENUM('active', 'inactive'),
       allowNull: false,
       defaultValue: 'active',
+    },
+    created_by: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    updated_by: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
     },
   },
   {

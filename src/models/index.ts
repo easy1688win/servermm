@@ -21,6 +21,7 @@ import LandingPageEvent from './LandingPageEvent';
 import Product from './Product';
 import Tenant from './Tenant';
 import SubBrand from './SubBrand';
+import UserTenant from './UserTenant';
 
 // User - Permission (Direct Many-to-Many - Deprecated but kept for compatibility if needed)
 User.belongsToMany(Permission, { through: UserPermission, foreignKey: 'userId', otherKey: 'permissionId' });
@@ -33,6 +34,10 @@ Permission.belongsToMany(Role, { through: RolePermission, foreignKey: 'permissio
 // User - Role (Many-to-Many)
 User.belongsToMany(Role, { through: UserRole, foreignKey: 'userId', otherKey: 'roleId' });
 Role.belongsToMany(User, { through: UserRole, foreignKey: 'roleId', otherKey: 'userId' });
+
+// Tenant - Role (One-to-Many)
+Tenant.hasMany(Role, { foreignKey: 'tenant_id' });
+Role.belongsTo(Tenant, { foreignKey: 'tenant_id' });
 
 // Player - Game (Many-to-One)
 Player.belongsTo(Game, { foreignKey: 'game_id' });
@@ -79,10 +84,19 @@ LandingPageEvent.belongsTo(LandingPage, { foreignKey: 'landing_page_id', onDelet
 Tenant.hasMany(SubBrand, { foreignKey: 'tenant_id' });
 SubBrand.belongsTo(Tenant, { foreignKey: 'tenant_id' });
 
+Tenant.belongsTo(User, { foreignKey: 'created_by', as: 'createdBy', constraints: false });
+Tenant.belongsTo(User, { foreignKey: 'updated_by', as: 'updatedBy', constraints: false });
+SubBrand.belongsTo(User, { foreignKey: 'created_by', as: 'createdBy', constraints: false });
+SubBrand.belongsTo(User, { foreignKey: 'updated_by', as: 'updatedBy', constraints: false });
+
 // User - Tenant/SubBrand (Many-to-One)
 User.belongsTo(Tenant, { foreignKey: 'tenant_id' });
 User.belongsTo(SubBrand, { foreignKey: 'sub_brand_id' });
 SubBrand.hasMany(User, { foreignKey: 'sub_brand_id' });
+
+// User - Managed Tenants (Many-to-Many)
+User.belongsToMany(Tenant, { through: UserTenant, foreignKey: 'userId', otherKey: 'tenantId', as: 'ManagedTenants' });
+Tenant.belongsToMany(User, { through: UserTenant, foreignKey: 'tenantId', otherKey: 'userId', as: 'TenantAgents' });
 
 export {
   User,
@@ -108,4 +122,5 @@ export {
   Product,
   Tenant,
   SubBrand,
+  UserTenant,
 };

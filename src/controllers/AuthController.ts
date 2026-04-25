@@ -488,12 +488,9 @@ const finalizeLogin = async (user: any, req: Request, res: Response, deviceId: s
 };
 
 const encodePermissionSlug = (slug: string): string => {
-  let hash = 0;
-  for (let i = 0; i < slug.length; i++) {
-    hash = (hash * 31 + slug.charCodeAt(i)) | 0;
-  }
-  const code = Math.abs(hash) % 9000 + 1000;
-  return `B${code}`;
+  const b64 = Buffer.from(String(slug), 'utf8').toString('base64');
+  const url = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return `P${url}`;
 };
 
 type MaintenanceGateSettings = {
@@ -1204,19 +1201,7 @@ export const revokeMySession = async (req: AuthRequest, res: Response): Promise<
       return;
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
-
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    const isSuperAdmin = Boolean(req.user?.is_super_admin);
 
     // Check if user has access to this device (owns a session with same device_id) or is Super Admin
     const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
@@ -1307,19 +1292,7 @@ export const lockDeviceFingerprint = async (req: AuthRequest, res: Response): Pr
       deviceId = String(bodyDeviceId);
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
-
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    const isSuperAdmin = Boolean(req.user?.is_super_admin);
 
     // Check if user has access to this device (owns a session with same device_id) or is Super Admin
     const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
@@ -1458,19 +1431,7 @@ export const unlockDeviceFingerprint = async (req: AuthRequest, res: Response): 
       deviceId = String(bodyDeviceId);
     }
 
-    // Check if user is Super Admin
-    const user = await User.findOne({
-      where: { id: userId },
-      include: [
-        {
-          model: Role,
-          where: { name: 'Super Admin' },
-          required: false
-        }
-      ]
-    });
-
-    const isSuperAdmin = user && (user as any).Roles && (user as any).Roles.length > 0;
+    const isSuperAdmin = Boolean(req.user?.is_super_admin);
 
     // Check if user has access to this device (owns a session with same device_id) or is Super Admin
     const hasAccessDevice = isSuperAdmin || await UserSession.findOne({
@@ -1557,16 +1518,8 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
 
     const safeName = user.full_name || user.username;
 
-    const permissionSet = new Set<string>();
-    if (user.Permissions) user.Permissions.forEach((p: any) => permissionSet.add(p.slug));
-    if (user.Roles) {
-      user.Roles.forEach((role: any) => {
-        if (role.Permissions) {
-          role.Permissions.forEach((p: any) => permissionSet.add(p.slug));
-        }
-      });
-    }
-    const permissionCodes = Array.from(permissionSet).map((slug) => encodePermissionSlug(slug));
+    const slugs = Array.isArray(req.user?.permissions) ? (req.user.permissions as string[]) : [];
+    const permissionCodes = slugs.map((slug) => encodePermissionSlug(slug));
 
     // Send the API Key as stored in DB (encrypted). 
     // The frontend treats it as an opaque token.

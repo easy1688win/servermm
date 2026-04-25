@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { Op, QueryTypes } from 'sequelize';
 import sequelize from '../config/database';
 import { AuthRequest } from '../middleware/auth';
-import { Game, Player, Product, Role, SubBrand, Transaction, User } from '../models';
+import { Game, Player, Product, Role, SubBrand, Transaction, User, UserTenant } from '../models';
 import { VendorFactory } from '../services/vendor/VendorFactory';
 import { getTenancyScopeOrThrow, withTenancyWhere } from '../tenancy/scope';
 import { sendError, sendSuccess } from '../utils/response';
@@ -333,7 +333,25 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
     const startRaw = (req.query.startDate as string | undefined) ?? (req.query.start_date as string | undefined) ?? null;
     const endRaw = (req.query.endDate as string | undefined) ?? (req.query.end_date as string | undefined) ?? null;
     const tenantIdRaw = (req.query.tenantId as string | undefined) ?? (req.query.tenant_id as string | undefined) ?? null;
-    const isSuperAdmin = Boolean(req.user?.is_super_admin);
+    const requesterId = req.user?.id;
+    const requester: any = requesterId
+      ? await User.findByPk(requesterId, { include: [{ model: Role, through: { attributes: [] }, required: false }] } as any)
+      : null;
+    const requesterRoles = requester?.Roles || [];
+    const isSuperAdmin =
+      Boolean(req.user?.is_super_admin) ||
+      Boolean(requester?.is_super_admin) ||
+      Boolean(requesterRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'super admin'));
+    const isAgent = Boolean(requesterRoles?.some?.((r: any) => String(r?.name ?? '').toLowerCase() === 'agent'));
+    const fallbackTenantId = Number(requester?.tenant_id ?? scope.tenant_id ?? null);
+    const managedTenantIds = isAgent && requesterId
+      ? (await UserTenant.findAll({ where: { userId: requesterId }, attributes: ['tenantId'] }))
+          .map((r: any) => Number(r.tenantId))
+          .filter((x: number) => Number.isFinite(x) && x > 0)
+      : [];
+    if (isAgent && Number.isFinite(fallbackTenantId) && fallbackTenantId > 0 && !managedTenantIds.includes(fallbackTenantId)) {
+      managedTenantIds.push(fallbackTenantId);
+    }
 
     const now = new Date();
     const todayKey = toSqlDateTimeInTz8(now).slice(0, 10);
@@ -355,10 +373,18 @@ export const getSubBrandWinLossReport = async (req: AuthRequest, res: Response) 
     }
 
     let effectiveTenantId = scope.tenant_id;
-    if (isSuperAdmin && tenantIdRaw && tenantIdRaw.trim().length > 0) {
+    if (tenantIdRaw && tenantIdRaw.trim().length > 0) {
       const tid = Number(tenantIdRaw);
       if (Number.isFinite(tid) && tid > 0) {
-        effectiveTenantId = tid;
+        if (isSuperAdmin) {
+          effectiveTenantId = tid;
+        } else if (isAgent) {
+          if (!managedTenantIds.includes(tid)) {
+            sendError(res, 'Code102', 403);
+            return;
+          }
+          effectiveTenantId = tid;
+        }
       }
     }
 

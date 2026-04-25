@@ -1,9 +1,10 @@
 import sequelize from '../config/database';
-import { User, Permission, Role, Setting, Tenant, SubBrand } from '../models';
+import { User, Permission, Role, Setting, Tenant, SubBrand, UserRole, UserTenant } from '../models';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { SYSTEM_ROLE_DESCRIPTIONS, SYSTEM_ROLE_NAMES } from '../constants/systemRoles';
+import { GLOBAL_ROLE_SPECS, SYSTEM_ROLE_NAMES, TENANT_DEFAULT_ROLE_SPECS } from '../constants/systemRoles';
+import { Op, QueryTypes } from 'sequelize';
 
 dotenv.config();
 
@@ -38,6 +39,7 @@ const PERMISSIONS = [
   { slug: 'view:system_settings', description: 'View System Settings' },
   { slug: 'view:games', description: 'View Game List' },
   { slug: 'action:game_operational', description: 'Game Operational' },
+  { slug: 'action:game_adjust_balance', description: 'Adjust Game Balance' },
   { slug: 'view:bank_catalog', description: 'View Bank Catalog' },
   { slug: 'view:player_metadata', description: 'View Player Metadata' },
   { slug: 'view:audit_logs', description: 'View all users audit logs' },
@@ -70,42 +72,6 @@ const PERMISSIONS = [
   { slug: 'action:marketing_manage', description: 'Manage Marketing Landing Pages' },
 ];
 
-const ROLES: Array<{
-  name: string;
-  description: string;
-  isSystem: boolean;
-  permissions: string[];
-}> = [];
-/*
-const ROLES = [
-  {
-    name: SYSTEM_ROLE_NAMES.superAdmin,
-    description: SYSTEM_ROLE_DESCRIPTIONS.superAdmin,
-    isSystem: true,
-    permissions: ['*']
-  },
-  {
-    name: SYSTEM_ROLE_NAMES.operator,
-    description: SYSTEM_ROLE_DESCRIPTIONS.operator,
-    isSystem: true,
-    permissions: [
-      'route:dashboard', 'route:transactions', 'route:transaction_history', 'route:players',
-      'action:deposit_create', 'action:bonus_create', 'action:withdrawal_create', 'action:player_create', 'action:player_edit',
-      'view:player_banks', 'action:player_banks_edit'
-    ]
-  },
-  {
-    name: SYSTEM_ROLE_NAMES.staff,
-    description: SYSTEM_ROLE_DESCRIPTIONS.staff,
-    isSystem: true,
-    permissions: [
-      'route:dashboard', 'route:reports', 'route:banks',
-      'view:bank_balance'
-    ]
-  }
-];
-*/
-
 async function initDb() {
   console.log('========================================');
   console.log('🔧 Database Initialization Started');
@@ -120,39 +86,87 @@ async function initDb() {
     await sequelize.authenticate();
     console.log('✅ Database connected successfully.\n');
 
+    try {
+      const dbName = (process.env.DB_NAME || (sequelize as any)?.config?.database || '').trim();
+      if (dbName) {
+        const roleTenantColumnRows = (await sequelize.query(
+          `
+          SELECT COUNT(*) AS cnt
+          FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = :db
+            AND TABLE_NAME = 'roles'
+            AND COLUMN_NAME = 'tenant_id'
+          `,
+          { replacements: { db: dbName }, type: QueryTypes.SELECT },
+        )) as any[];
+
+        const tenantsTableRows = (await sequelize.query(
+          `
+          SELECT COUNT(*) AS cnt
+          FROM INFORMATION_SCHEMA.TABLES
+          WHERE TABLE_SCHEMA = :db
+            AND TABLE_NAME = 'tenants'
+          `,
+          { replacements: { db: dbName }, type: QueryTypes.SELECT },
+        )) as any[];
+
+        const hasRoleTenantId = Number(roleTenantColumnRows?.[0]?.cnt ?? 0) > 0;
+        const hasTenantsTable = Number(tenantsTableRows?.[0]?.cnt ?? 0) > 0;
+
+        if (hasRoleTenantId && hasTenantsTable) {
+          await sequelize.query(`
+            UPDATE roles r
+            LEFT JOIN tenants t ON t.id = r.tenant_id
+            SET r.tenant_id = NULL
+            WHERE r.tenant_id IS NOT NULL
+              AND t.id IS NULL
+          `);
+        }
+      }
+    } catch (e) {
+      void e;
+    }
+
     // Sync models (create tables)
     console.log('⏳ Syncing database tables...');
     await sequelize.sync({ alter: true });
     console.log('✅ Database tables synced.\n');
 
-    // Initialize default tenant
-    const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim().toUpperCase();
-    const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim();
+    let defaultTenant: any = null;
+    let defaultSubBrand: any = null;
 
-    const [defaultTenant] = await Tenant.findOrCreate({
-      where: { prefix: defaultTenantPrefix },
-      defaults: {
-        prefix: defaultTenantPrefix,
-        name: defaultTenantName,
-        status: 'active',
-      },
-    });
-    console.log(`✅ Default tenant ready: ${defaultTenant.name} (${defaultTenant.prefix})`);
+    if (false) {
+      // Initialize default tenant
+      const defaultTenantPrefix = (process.env.INIT_TENANT_PREFIX || '').trim().toUpperCase();
+      const defaultTenantName = (process.env.INIT_TENANT_NAME || '').trim();
 
-    // Initialize default sub-brand
-    const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim().toUpperCase();
-    const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim();
+      const [tenant] = await Tenant.findOrCreate({
+        where: { prefix: defaultTenantPrefix },
+        defaults: {
+          prefix: defaultTenantPrefix,
+          name: defaultTenantName,
+          status: 'active',
+        },
+      });
+      defaultTenant = tenant;
+      console.log(`✅ Default tenant ready: ${defaultTenant.name} (${defaultTenant.prefix})`);
 
-    const [defaultSubBrand] = await SubBrand.findOrCreate({
-      where: { code: defaultSubBrandCode },
-      defaults: {
-        tenant_id: defaultTenant.id,
-        code: defaultSubBrandCode,
-        name: defaultSubBrandName,
-        status: 'active',
-      },
-    });
-    console.log(`✅ Default sub-brand ready: ${defaultSubBrand.name} (${defaultSubBrand.code})\n`);
+      // Initialize default sub-brand
+      const defaultSubBrandCode = (process.env.INIT_SUB_BRAND_CODE || '').trim().toUpperCase();
+      const defaultSubBrandName = (process.env.INIT_SUB_BRAND_NAME || '').trim();
+
+      const [subBrand] = await SubBrand.findOrCreate({
+        where: { code: defaultSubBrandCode },
+        defaults: {
+          tenant_id: defaultTenant.id,
+          code: defaultSubBrandCode,
+          name: defaultSubBrandName,
+          status: 'active',
+        },
+      });
+      defaultSubBrand = subBrand;
+      console.log(`✅ Default sub-brand ready: ${defaultSubBrand.name} (${defaultSubBrand.code})\n`);
+    }
 
     // Seed Permissions
     console.log('⏳ Seeding permissions...');
@@ -164,40 +178,130 @@ async function initDb() {
     }
     console.log(`✅ ${PERMISSIONS.length} permissions ready.\n`);
 
-    // Seed Roles
-    console.log('⏳ Seeding roles...');
-    for (const r of ROLES) {
-      const [role] = await Role.findOrCreate({
-        where: { name: r.name },
-        defaults: {
-          name: r.name,
-          description: r.description,
-          isSystem: r.isSystem
-        }
-      });
+    if (false) {
+      // Seed Roles
+      console.log('⏳ Seeding roles...');
+      const allTenants = await Tenant.findAll({ order: [['id', 'ASC']] });
 
-      // Assign permissions
-      if (r.permissions.includes('*')) {
-        const allPerms = await Permission.findAll();
-        // @ts-ignore
-        await role.setPermissions(allPerms);
-      } else {
-        const perms = await Permission.findAll({
-          where: { slug: r.permissions }
+      for (const r of GLOBAL_ROLE_SPECS) {
+        const [role] = await Role.findOrCreate({
+          where: { tenant_id: null, name: r.name } as any,
+          defaults: {
+            tenant_id: null,
+            name: r.name,
+            description: r.description,
+            isSystem: r.isSystem
+          } as any
         });
-        // @ts-ignore
-        await role.setPermissions(perms);
+
+        if (r.permissions.includes('*')) {
+          const allPerms = await Permission.findAll();
+          await (role as any).setPermissions(allPerms);
+        } else {
+          const perms = await Permission.findAll({
+            where: { slug: r.permissions }
+          });
+          await (role as any).setPermissions(perms);
+        }
       }
+
+      const legacyGlobalRoles = await Role.findAll({
+        where: {
+          tenant_id: null,
+          name: { [Op.ne]: SYSTEM_ROLE_NAMES.superAdmin }
+        } as any,
+        include: [Permission],
+      });
+      const legacyRoleByName = new Map<string, any>();
+      for (const r of legacyGlobalRoles as any[]) {
+        const key = String(r?.name ?? '').toLowerCase();
+        if (key) legacyRoleByName.set(key, r);
+      }
+
+      for (const tenant of allTenants as any[]) {
+        for (const spec of TENANT_DEFAULT_ROLE_SPECS) {
+          const [role, created] = await Role.findOrCreate({
+            where: { tenant_id: tenant.id, name: spec.name } as any,
+            defaults: {
+              tenant_id: tenant.id,
+              name: spec.name,
+              description: spec.description,
+              isSystem: false,
+            } as any,
+          });
+
+          if (created) {
+            const legacy = legacyRoleByName.get(String(spec.name).toLowerCase());
+            const legacyPerms = legacy?.Permissions ? legacy.Permissions : null;
+            if (Array.isArray(legacyPerms) && legacyPerms.length > 0) {
+              await (role as any).setPermissions(legacyPerms);
+            } else if (spec.permissions.includes('*')) {
+              const allPerms = await Permission.findAll();
+              await (role as any).setPermissions(allPerms);
+            } else {
+              const perms = await Permission.findAll({ where: { slug: spec.permissions } });
+              await (role as any).setPermissions(perms);
+            }
+          }
+        }
+      }
+
+      for (const legacy of legacyGlobalRoles as any[]) {
+        const legacyNameLower = String(legacy?.name ?? '').toLowerCase();
+        const mappings = await UserRole.findAll({
+          where: { roleId: legacy.id } as any,
+          attributes: ['userId', 'roleId'],
+        });
+
+        for (const m of mappings as any[]) {
+          const user = await User.findByPk(m.userId, { attributes: ['id', 'tenant_id'] } as any);
+          if (!user) continue;
+
+          const tenantIds: number[] = [];
+          const baseTid = Number((user as any).tenant_id ?? null);
+          if (Number.isFinite(baseTid) && baseTid > 0) tenantIds.push(baseTid);
+
+          if (legacyNameLower === 'agent') {
+            const rows = await UserTenant.findAll({ where: { userId: user.id } as any, attributes: ['tenantId'] });
+            for (const r of rows as any[]) {
+              const tid = Number(r.tenantId ?? null);
+              if (Number.isFinite(tid) && tid > 0 && !tenantIds.includes(tid)) tenantIds.push(tid);
+            }
+          }
+
+          for (const tid of tenantIds) {
+            const tenantRole = await Role.findOne({ where: { tenant_id: tid, name: legacy.name } as any });
+            if (!tenantRole) continue;
+            await UserRole.findOrCreate({ where: { userId: user.id, roleId: (tenantRole as any).id } as any });
+          }
+
+          await UserRole.destroy({ where: { userId: user.id, roleId: legacy.id } as any });
+        }
+      }
+
+      console.log(`✅ Roles ready.\n`);
     }
-    console.log(`✅ ${ROLES.length} roles ready.\n`);
 
     // Create Admin User
     console.log('⏳ Creating admin user...');
+
+    if (!defaultTenant) {
+      defaultTenant = await Tenant.findOne({ order: [['id', 'ASC']] } as any);
+    }
+    if (!defaultSubBrand) {
+      defaultSubBrand = await SubBrand.findOne({ order: [['id', 'ASC']] } as any);
+    }
 
     // Fixed admin credentials
     const adminUsername = 'superadminsparkx';
     const adminPassword = crypto.randomBytes(16).toString('base64url');
     const adminFullName = 'System Administrator';
+
+    if (!defaultTenant || !defaultSubBrand) {
+      console.log(`ℹ️  Skip admin create: missing tenant/sub-brand.\n`);
+      process.exit(0);
+      return;
+    }
 
     const hashedPassword = await bcrypt.hash(adminPassword, 10);
 
@@ -217,7 +321,7 @@ async function initDb() {
 
     if (created) {
       // Assign Super Admin role
-      const superAdminRole = await Role.findOne({ where: { name: 'Super Admin' } });
+      const superAdminRole = await Role.findOne({ where: { tenant_id: null, name: 'Super Admin' } as any });
       if (superAdminRole) {
         // @ts-ignore
         await admin.setRoles([superAdminRole]);
@@ -237,28 +341,30 @@ async function initDb() {
       console.log(`ℹ️  Admin user '${adminUsername}' already exists.\n`);
     }
 
-    // Initialize Settings
-    console.log('⏳ Initializing settings...');
+    if (false) {
+      // Initialize Settings
+      console.log('⏳ Initializing settings...');
 
-    const defaultReferralSources = ['Google', 'Facebook', 'Telegram', 'Line', 'Friend'];
-    const defaultPlayerTags = [
-      { name: 'New', color: '#3b82f6' },
-      { name: 'VIP', color: '#f97316' },
-      { name: 'Bonus Hunter', color: '#ef4444' },
-      { name: 'Regular', color: '#22c55e' },
-    ];
+      const defaultReferralSources = ['Google', 'Facebook', 'Telegram', 'Line', 'Friend'];
+      const defaultPlayerTags = [
+        { name: 'New', color: '#3b82f6' },
+        { name: 'VIP', color: '#f97316' },
+        { name: 'Bonus Hunter', color: '#ef4444' },
+        { name: 'Regular', color: '#22c55e' },
+      ];
 
-    await Setting.findOrCreate({
-      where: { key: 'referralSources' },
-      defaults: { key: 'referralSources', value: defaultReferralSources }
-    });
+      await Setting.findOrCreate({
+        where: { key: 'referralSources' },
+        defaults: { key: 'referralSources', value: defaultReferralSources }
+      });
 
-    await Setting.findOrCreate({
-      where: { key: 'tagOptions' },
-      defaults: { key: 'tagOptions', value: defaultPlayerTags }
-    });
+      await Setting.findOrCreate({
+        where: { key: 'tagOptions' },
+        defaults: { key: 'tagOptions', value: defaultPlayerTags }
+      });
 
-    console.log('✅ Default settings ready.\n');
+      console.log('✅ Default settings ready.\n');
+    }
 
     console.log('========================================');
     console.log('✅ DATABASE INITIALIZATION COMPLETE');
