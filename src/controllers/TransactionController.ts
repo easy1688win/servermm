@@ -1595,13 +1595,13 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
   let ctxGameAccountId: string | null = null;
   const clientIp = getClientIp(req);
   const operator_id = req.user?.id;
-  let type: string | undefined;
+  let type: TransactionAmountType | undefined;
 
   try {
     await ensureTransactionsSynced();
     const tenancy = getTenancyScopeOrThrow(req);
     const body = req.body || {};
-    type = body.type;
+    type = body.type as TransactionAmountType;
     const { player_id, bank_account_id, amount, game_id, game_account_id } = body;
     ctxPlayerId = typeof player_id === 'number' ? player_id : (player_id ? Number(player_id) : null);
     ctxGameId = typeof game_id === 'number' ? game_id : (game_id ? Number(game_id) : null);
@@ -1625,6 +1625,11 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     }
     if (type === 'WALVE' && !userPermissions.includes('action:burn_create')) {
       sendError(res, 'Code303', 403);
+      return;
+    }
+
+    if (!type || !['DEPOSIT', 'WITHDRAWAL', 'WALVE', 'BONUS'].includes(type)) {
+      sendError(res, 'Code304', 400, { detail: 'Invalid transaction type' });
       return;
     }
 
