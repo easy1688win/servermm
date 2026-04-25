@@ -1593,18 +1593,22 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
   let ctxPlayerId: number | null = null;
   let ctxGameId: number | null = null;
   let ctxGameAccountId: string | null = null;
+  const clientIp = getClientIp(req);
+  const operator_id = req.user?.id;
+  let type: string | undefined;
+
   try {
     await ensureTransactionsSynced();
-    const clientIp = getClientIp(req);
     const tenancy = getTenancyScopeOrThrow(req);
-    const { player_id, bank_account_id, type, amount, game_id, game_account_id } = req.body;
+    const body = req.body || {};
+    type = body.type;
+    const { player_id, bank_account_id, amount, game_id, game_account_id } = body;
     ctxPlayerId = typeof player_id === 'number' ? player_id : (player_id ? Number(player_id) : null);
     ctxGameId = typeof game_id === 'number' ? game_id : (game_id ? Number(game_id) : null);
     ctxGameAccountId = typeof game_account_id === 'string' ? game_account_id : null;
     const bonusRaw = (req.body.bonus ?? 0) as number | string;
     const tipsRaw = (req.body.tips ?? 0) as number | string;
     let remark: string | null = (req.body.remark ?? req.body.staff_note ?? null) as string | null;
-    const operator_id = req.user.id;
     const userPermissions = req.user.permissions || [];
 
     if (type === 'DEPOSIT' && !userPermissions.includes('action:deposit_create')) {
@@ -2139,18 +2143,20 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             ? 'WALVE'
             : 'UNKNOWN';
 
-        await logAudit(
-          operator_id,
-          `TRANSACTION_FAILED_${actionSuffix}`,
-          null,
-          { 
-            transactionId: pendingTransaction.id, 
-            error: categoryRemark, 
-            vendorMessage,
-            detail: responseDetail
-          },
-          clientIp || undefined,
-        );
+        if (operator_id) {
+          await logAudit(
+            operator_id,
+            `TRANSACTION_FAILED_${actionSuffix}`,
+            null,
+            { 
+              transactionId: pendingTransaction.id, 
+              error: categoryRemark, 
+              vendorMessage,
+              detail: responseDetail
+            },
+            clientIp || undefined,
+          ).catch(() => {});
+        }
 
         if (msgLower.includes('suspended')) {
           try {
