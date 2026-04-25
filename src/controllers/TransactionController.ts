@@ -2136,7 +2136,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           msgLower.includes('balance not enough') || 
           msgLower.includes('not enough balance') ||
           msgLower.includes('credit not enough') ||
-          msgLower.includes('not enough credit')
+          msgLower.includes('not enough credit') ||
+          msgLower.includes('cannot more than 0.0')
         ) {
           categoryRemark = 'Insufficient Credit';
           errorKey = 'Code1014'; // Map to "资金不足"
