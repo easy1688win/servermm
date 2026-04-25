@@ -2080,6 +2080,21 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
             { where: { id: pendingTransaction.id } },
           );
           await pendingTransaction.reload();
+
+          if (operator_id) {
+            const actionSuffix = (type || 'UNKNOWN').toUpperCase();
+            await logAudit(
+              operator_id,
+              `TRANSACTION_FAILED_${actionSuffix}`,
+              null,
+              { 
+                transactionId: pendingTransaction.id, 
+                error: 'Balance Error', 
+                detail 
+              },
+              clientIp || undefined,
+            ).catch(() => {});
+          }
         } catch {
         }
       }
