@@ -2091,16 +2091,32 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     }
 
     let responseDetail: string | null = null;
+    let errorKey = 'Code2';
+    let httpStatus = 500;
+
     if (pendingTransaction) {
       try {
         const rawMsg = String(error?.vendorMessage ?? error?.error ?? error?.message ?? error ?? '');
         const vendorMessage = rawMsg.trim().length > 0 ? rawMsg.slice(0, 500) : null;
         const msgLower = rawMsg.toLowerCase();
         let categoryRemark = 'API ERROR';
-        if (msgLower.includes('suspended')) categoryRemark = 'Player account is suspended';
-        else if (msgLower.includes('insufficient')) categoryRemark = 'Insufficient Credit';
-        else if (msgLower.includes('not found')) categoryRemark = 'Player Not Found';
-        else if (msgLower.includes('timeout') || msgLower.includes('network') || msgLower.includes('ecconnrefused')) categoryRemark = 'Network Error';
+        
+        if (msgLower.includes('suspended')) {
+          categoryRemark = 'Player account is suspended';
+        } else if (
+          msgLower.includes('insufficient') || 
+          msgLower.includes('balance not enough') || 
+          msgLower.includes('not enough balance')
+        ) {
+          categoryRemark = 'Insufficient Credit';
+          errorKey = 'Code1014'; // Map to "资金不足" (Insufficient funds)
+          httpStatus = 400;
+        } else if (msgLower.includes('not found')) {
+          categoryRemark = 'Player Not Found';
+        } else if (msgLower.includes('timeout') || msgLower.includes('network') || msgLower.includes('ecconnrefused')) {
+          categoryRemark = 'Network Error';
+        }
+        
         responseDetail = categoryRemark;
 
         const existingRemark =
@@ -2140,7 +2156,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       } catch {
       }
     }
-    sendError(res, 'Code2', 500, { detail: responseDetail });
+    sendError(res, errorKey, httpStatus, { detail: responseDetail });
   }
 };
 

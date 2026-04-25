@@ -125,7 +125,10 @@ export const getUsers = async (req: AuthRequest, res: Response): Promise<void> =
       }
       const sbTenantId = Number(sb.tenant_id ?? null);
       if (requestedTenantId && sbTenantId !== requestedTenantId) {
-        sendError(res, 'Code102', 403);
+        // If sub-brand does not belong to the requested tenant, 
+        // return an empty user list instead of 403 to prevent UI blocking.
+        // This can happen if frontend state is temporarily inconsistent.
+        sendSuccess(res, 'Code1', []);
         return;
       }
       if (!isSuperAdmin) {
@@ -344,7 +347,9 @@ export const getUsersContext = async (req: AuthRequest, res: Response): Promise<
       }
       const sbTenantId = Number(sb.tenant_id ?? null);
       if (requestedTenantId && sbTenantId !== requestedTenantId) {
-        sendError(res, 'Code102', 403);
+        // If sub-brand does not belong to the requested tenant, 
+        // return empty data instead of 403 to prevent UI blocking.
+        sendSuccess(res, 'Code1', { roles: [], permissions: [], users: [], tenants: [], subBrands: [] });
         return;
       }
       if (!isSuperAdmin) {

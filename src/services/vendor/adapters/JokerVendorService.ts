@@ -661,4 +661,29 @@ export class JokerVendorService extends BaseVendorService implements VendorServi
       };
     }
   }
+
+  /**
+   * 判断错误是否需要查单
+   */
+  shouldVerifyTransferOnError(errorMessage?: string): boolean {
+    if (!errorMessage) return true;
+    const lower = errorMessage.toLowerCase();
+    
+    // 业务错误：不需要查单
+    if (
+      lower.includes('insufficient balance') ||
+      lower.includes('balance not enough') ||
+      lower.includes('not enough balance') ||
+      lower.includes('invalid username') ||
+      lower.includes('user not found') ||
+      lower.includes('suspended') ||
+      lower.includes('amount must be positive') ||
+      lower.includes('duplicate requestid')
+    ) {
+      return false;
+    }
+
+    // 网络或未知错误：需要查单确认
+    return true;
+  }
 }
