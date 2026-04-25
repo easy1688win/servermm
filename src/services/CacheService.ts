@@ -15,6 +15,17 @@ export const invalidateCache = (key: string) => {
   cache.del(key);
 };
 
+export const invalidateUserPermissionsCache = (userId: number | string) => {
+  const keys = cache.keys();
+  const prefixV2 = `user_permissions:v2:${userId}:`;
+  const prefixV1 = `user_permissions:${userId}:`;
+  keys.forEach((k) => {
+    if (k.startsWith(prefixV2) || k.startsWith(prefixV1)) {
+      cache.del(k);
+    }
+  });
+};
+
 export const flushCache = () => {
   cache.flushAll();
 };

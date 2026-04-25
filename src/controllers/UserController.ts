@@ -3,7 +3,7 @@ import { User, Permission, Role, UserRole, UserPermission, Tenant, SubBrand, Use
 import bcrypt from 'bcryptjs';
 import { AuthRequest } from '../middleware/auth';
 import { logAudit, getClientIp } from '../services/AuditService';
-import { invalidateCache } from '../services/CacheService';
+import { invalidateCache, invalidateUserPermissionsCache } from '../services/CacheService';
 import crypto from 'crypto';
 import { Op } from 'sequelize';
 import { sendSuccess, sendError } from '../utils/response';
@@ -818,10 +818,7 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
             await UserRole.findOrCreate({ where: { userId: user.id, roleId: role.id } as any });
           }
 
-          invalidateCache(`user_permissions:${user.id}:${targetTenantId ?? 'null'}`);
-          if (Number.isFinite(originalTenantId) && originalTenantId > 0 && originalTenantId !== targetTenantId) {
-            invalidateCache(`user_permissions:${user.id}:${originalTenantId}`);
-          }
+          invalidateUserPermissionsCache(user.id);
         }
       } else {
         // 非 Super Admin：忽略 roles 字段
@@ -843,6 +840,7 @@ export const updateUser = async (req: AuthRequest, res: Response): Promise<void>
         for (const perm of permObjects) {
             await UserPermission.create({ userId: user.id, permissionId: perm.id });
         }
+        invalidateUserPermissionsCache(user.id);
     }
 
     await logAudit(req.user?.id, 'USER_UPDATE', original, req.body, getClientIp(req));
