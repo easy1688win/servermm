@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth';
 import sequelize from '../config/database';
 import { logAudit } from '../services/AuditService';
 import { VendorFactory } from '../services/vendor/VendorFactory';
-import { getTransactionAmounts } from '../services/transactions/transaction-amounts';
+import { getTransactionAmounts, TransactionAmountType } from '../services/transactions/transaction-amounts';
 import { Op } from 'sequelize';
 import { sanitizePlayerForResponse } from './PlayerController';
 import { sanitizeBankAccountForResponse } from './BankAccountController';
@@ -1609,7 +1609,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     const bonusRaw = (req.body.bonus ?? 0) as number | string;
     const tipsRaw = (req.body.tips ?? 0) as number | string;
     let remark: string | null = (req.body.remark ?? req.body.staff_note ?? null) as string | null;
-    const userPermissions = req.user.permissions || [];
+    const userPermissions = req.user?.permissions || [];
 
     if (type === 'DEPOSIT' && !userPermissions.includes('action:deposit_create')) {
       sendError(res, 'Code301', 403);
