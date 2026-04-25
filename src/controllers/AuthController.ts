@@ -1518,7 +1518,48 @@ export const getUs = async (req: any, res: Response): Promise<void> => {
 
     const safeName = user.full_name || user.username;
 
-    const slugs = Array.isArray(req.user?.permissions) ? (req.user.permissions as string[]) : [];
+    const effectiveTenantIdRaw = req.user?.tenant_id ?? user.tenant_id ?? null;
+    const effectiveTenantId = Number(effectiveTenantIdRaw);
+    const scopedTenantId =
+      Number.isFinite(effectiveTenantId) && effectiveTenantId > 0 ? effectiveTenantId : null;
+
+    const slugSet = new Set<string>();
+    if (Array.isArray(user.Permissions)) {
+      for (const p of user.Permissions as any[]) {
+        const slug = typeof p?.slug === 'string' ? p.slug : '';
+        if (slug) slugSet.add(slug);
+      }
+    }
+    if (Array.isArray(user.Roles)) {
+      for (const role of user.Roles as any[]) {
+        const roleNameLower = String(role?.name ?? '').toLowerCase();
+        const roleTenantIdRaw = role?.tenant_id ?? null;
+        const roleTenantIdNum = roleTenantIdRaw != null ? Number(roleTenantIdRaw) : NaN;
+        const roleTenantId =
+          Number.isFinite(roleTenantIdNum) && roleTenantIdNum > 0 ? roleTenantIdNum : null;
+
+        const allowRole =
+          (roleTenantId != null && scopedTenantId != null && roleTenantId === scopedTenantId) ||
+          (roleTenantId == null && roleNameLower === 'super admin');
+        if (!allowRole) continue;
+
+        if (Array.isArray(role?.Permissions)) {
+          for (const p of role.Permissions as any[]) {
+            const slug = typeof p?.slug === 'string' ? p.slug : '';
+            if (slug) slugSet.add(slug);
+          }
+        }
+      }
+    }
+
+    const slugs =
+      slugSet.size > 0
+        ? Array.from(slugSet).sort()
+        : Array.isArray(req.user?.permissions)
+          ? ((req.user.permissions as any[])
+              .map((x) => String(x ?? '').trim())
+              .filter((x) => x.length > 0) as string[])
+          : [];
     const permissionCodes = slugs.map((slug) => encodePermissionSlug(slug));
 
     // Send the API Key as stored in DB (encrypted). 
