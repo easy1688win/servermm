@@ -2129,6 +2129,8 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
         
         if (msgLower.includes('suspended')) {
           categoryRemark = 'Player account is suspended';
+          errorKey = 'Code1017';
+          httpStatus = 403;
         } else if (
           msgLower.includes('insufficient') || 
           msgLower.includes('balance not enough') || 
@@ -2137,12 +2139,20 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           msgLower.includes('not enough credit')
         ) {
           categoryRemark = 'Insufficient Credit';
-          errorKey = 'Code1014'; // Map to "资金不足" (Insufficient funds)
+          errorKey = 'Code1014'; // Map to "资金不足"
+          httpStatus = 400;
+        } else if (msgLower.includes('invalid amount') || msgLower.includes('cannot more than')) {
+          categoryRemark = 'Invalid Amount';
+          errorKey = 'Code1018';
           httpStatus = 400;
         } else if (msgLower.includes('not found')) {
           categoryRemark = 'Player Not Found';
+          errorKey = 'Code1019';
+          httpStatus = 404;
         } else if (msgLower.includes('timeout') || msgLower.includes('network') || msgLower.includes('ecconnrefused')) {
           categoryRemark = 'Network Error';
+          errorKey = 'Code1020';
+          httpStatus = 504;
         }
         
         responseDetail = categoryRemark;
