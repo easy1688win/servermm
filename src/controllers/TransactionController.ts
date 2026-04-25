@@ -1596,10 +1596,11 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
   const clientIp = getClientIp(req);
   const operator_id = req.user?.id;
   let type: TransactionAmountType | undefined;
+  let tenancy: any = null;
 
   try {
     await ensureTransactionsSynced();
-    const tenancy = getTenancyScopeOrThrow(req);
+    tenancy = getTenancyScopeOrThrow(req);
     const body = req.body || {};
     type = body.type as TransactionAmountType;
     const { player_id, bank_account_id, amount, game_id, game_account_id } = body;
@@ -2098,6 +2099,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
                 detail 
               },
               clientIp || undefined,
+              tenancy
             ).catch(() => {});
           }
         } catch {
@@ -2175,6 +2177,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
               detail: responseDetail
             },
             clientIp || undefined,
+            tenancy
           ).catch(() => {});
         }
 
