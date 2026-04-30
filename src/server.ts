@@ -15,7 +15,7 @@ import { requireAppSignature } from './middleware/appSignature';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT;
+const PORT = 5000;
 
 const exactOrigins = new Set<string>(
   (process.env.CORS_ORIGINS || '')
